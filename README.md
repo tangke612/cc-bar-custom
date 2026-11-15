@@ -1,3 +1,12 @@
+> [!NOTE]
+> **这是 [nanvon/cc-bar](https://github.com/nanvon/cc-bar) 的个人定制版（`custom` 分支）。** 原项目采用 MIT 协议，版权归原作者 nanvon 所有。定制版在原有功能上增加：
+>
+> - **悬停查看额度**：鼠标停在菜单栏图标上即弹出面板，移开自动收起，全程不抢终端键盘焦点；图钉固定、⌃⌥K 全局快捷键
+> - **本地历史会话检索**：只读索引 Codex、Antigravity（CLI / 桌面端）、Claude Code 会话，还原真实工作目录，支持项目 / 提问 / 分支 / 拼音检索
+> - **一键复制恢复命令**：生成 `cd '<目录>' && codex resume <id>` / `agy --conversation <id>` / `claude --resume <id>`，可继承原会话的权限（含 YOLO）；右键可直接在终端恢复、在 Finder 或编辑器中打开项目
+>
+> **安装（仅 Apple 芯片 Mac）**：从本仓库 [Releases](https://github.com/tangke612/cc-bar-custom/releases/latest) 下载 `CCBar.dmg`，拖入「应用程序」。安装包为本地 ad-hoc 签名、未经公证，首次打开前在终端执行一次 `xattr -cr /Applications/CCBar.app`。定制版已关闭应用内更新，避免被原项目新版本覆盖；原项目的介绍见下文。
+
 <p align="center">
   <img src="Resources/Assets.xcassets/AppIcon.appiconset/icon_256.png" width="128" alt="cc-bar Logo">
 </p>
