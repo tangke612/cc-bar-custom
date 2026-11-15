@@ -315,4 +315,66 @@ final class GoogleAPITests: XCTestCase {
         XCTAssertEqual(session?.configuredMode, .auto)
         XCTAssertFalse(suite.dictionaryRepresentation().description.contains(aqKey))
     }
+
+    func testStandardAIzaKeyRejectedOnVertexDetectsUnsupportedAPIKeyError() async {
+        let aiZaKey = "AIza" + "SyTestUnsupportedVertexKey123456"
+        let vertexSession = GoogleAPIAuthSession(
+            apiKey: aiZaKey,
+            source: .manualKeychain,
+            resolvedMode: .vertexExpress,
+            configuredMode: .vertexExpress
+        )
+
+        let unsupportedResult = await GoogleAPIQuotaClient.fetch(
+            session: vertexSession,
+            dailyBudgetUSD: 0,
+            monthlyBudgetUSD: 0,
+            dataLoader: { request in
+                let body = """
+                {"error":{"code":401,"message":"API keys are not supported by this API. Expected OAuth2 access token or other authentication credentials that assert a principal.","status":"UNAUTHENTICATED"}}
+                """
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 401,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!
+                return (Data(body.utf8), response)
+            }
+        )
+
+        guard case .failure(let unsupportedError) = unsupportedResult else {
+            return XCTFail("Expected Vertex AI rejection error")
+        }
+        XCTAssertTrue(GoogleAPIQuotaClient.isUnsupportedAPIKeyForVertexError(unsupportedError))
+        XCTAssertFalse(GoogleAPIQuotaClient.isInvalidKeyError(unsupportedError))
+        XCTAssertFalse(GoogleAPIQuotaClient.isServiceBlockedError(unsupportedError))
+
+        let invalidResult = await GoogleAPIQuotaClient.validateKey(
+            session: GoogleAPIAuthSession(
+                apiKey: aiZaKey,
+                source: .manualKeychain,
+                resolvedMode: .aiStudio,
+                configuredMode: .aiStudio
+            ),
+            dataLoader: { request in
+                let body = """
+                {"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"API_KEY_INVALID"}]}}
+                """
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 400,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!
+                return (Data(body.utf8), response)
+            }
+        )
+
+        guard case .failure(let invalidError) = invalidResult else {
+            return XCTFail("Expected invalid API key error")
+        }
+        XCTAssertTrue(GoogleAPIQuotaClient.isInvalidKeyError(invalidError))
+        XCTAssertFalse(GoogleAPIQuotaClient.isUnsupportedAPIKeyForVertexError(invalidError))
+    }
 }

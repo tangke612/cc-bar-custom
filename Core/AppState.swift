@@ -2610,11 +2610,47 @@ final class AppState {
         return error.userMessage
     }
 
-    private func googleAPIAuthFailureMessage(_ error: QuotaError, mode: GoogleAPIMode.ResolvedMode) -> String {
-        if GoogleAPIQuotaClient.isServiceBlockedError(error) {
+    func googleAPIAuthFailureMessage(
+        _ error: QuotaError,
+        mode: GoogleAPIMode.ResolvedMode,
+        configuredMode: GoogleAPIMode? = nil
+    ) -> String {
+        let effectiveConfigured = configuredMode ?? SettingsStore.shared.googleAPIMode
+        if GoogleAPIQuotaClient.isUnsupportedAPIKeyForVertexError(error) {
+            if effectiveConfigured == .vertexExpress || mode == .vertexExpress {
+                return tr(
+                    "Standard AIza keys are not supported by Vertex AI (AQ.… Express key or OAuth required). Switch to Auto / AI Studio.",
+                    "Vertex AI 不支持普通 AIza 密钥（需 AQ.… 密钥或 OAuth）。请改选「自动识别 / AI Studio」，或改用 AQ.… 密钥。"
+                )
+            }
             return tr(
-                "API service blocked for \(mode.displayLabel) — check Google Cloud API restrictions or switch endpoint mode",
-                "当前 Key 未开通 \(mode.displayLabel) 接口权限（请检查 GCP API 限制或切换接口类型）"
+                "This API key type is not supported by \(mode.displayLabel) — switch endpoint mode or use the matching key.",
+                "当前密钥类型不受 \(mode.displayLabel) 支持，请切换接口类型或更换对应的 API Key。"
+            )
+        }
+        if GoogleAPIQuotaClient.isInvalidKeyError(error) {
+            return tr(
+                "API Key is invalid or expired (API_KEY_INVALID) — check the pasted key and try again.",
+                "API Key 无效或已失效（API_KEY_INVALID），请检查粘贴的密钥是否正确。"
+            )
+        }
+        if GoogleAPIQuotaClient.isServiceBlockedError(error) {
+            if mode == .vertexExpress {
+                return tr(
+                    "Vertex AI is blocked for this key (API_KEY_SERVICE_BLOCKED). Switch to Auto / AI Studio, or allow Vertex AI API in GCP key restrictions.",
+                    "该 Key 被限制访问 Vertex AI（API_KEY_SERVICE_BLOCKED）。请改选「自动识别 / AI Studio」，或在 GCP 凭据页解除 API 限制。"
+                )
+            }
+            return tr(
+                "API service blocked for \(mode.displayLabel) — check Google Cloud API restrictions or switch endpoint mode.",
+                "该 Key 未开通 \(mode.displayLabel) 接口权限，请检查 GCP API 启用状态与 Key 限制。"
+            )
+        }
+        if error.isAuthFailure {
+            let status = error.httpStatusCode ?? 401
+            return tr(
+                "API Key rejected by \(mode.displayLabel) (HTTP \(status)) — verify the key and GCP API restrictions.",
+                "\(mode.displayLabel) 拒绝了该 API Key（HTTP \(status)），请检查密钥本身与 GCP 接口权限限制。"
             )
         }
         return error.userMessage

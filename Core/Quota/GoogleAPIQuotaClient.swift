@@ -410,6 +410,18 @@ nonisolated enum GoogleAPIQuotaClient {
             || upper.contains("HAS NOT BEEN USED IN PROJECT")
     }
 
+    static func isUnsupportedAPIKeyForVertexError(_ error: QuotaError) -> Bool {
+        guard case .http(let code, let body) = error, [400, 401, 403].contains(code) else { return false }
+        let upper = body.uppercased()
+        return upper.contains("API KEYS ARE NOT SUPPORTED")
+            || upper.contains("EXPECTED OAUTH2 ACCESS TOKEN")
+    }
+
+    static func isInvalidKeyError(_ error: QuotaError) -> Bool {
+        guard case .http(let code, let body) = error, [400, 401, 403].contains(code) else { return false }
+        return isInvalidAPIKeyBody(body)
+    }
+
     static func makeSnapshot(
         mode: GoogleAPIMode.ResolvedMode,
         usage: GoogleAPIUsageSummary,

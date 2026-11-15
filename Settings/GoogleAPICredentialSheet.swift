@@ -445,31 +445,29 @@ struct GoogleAPICredentialSheet: View {
 
     private func candidateSessionForValidation(trimmedKey: String) -> GoogleAPIAuthSession? {
         let sanitizedInput = GoogleAPIAuth.sanitizeKey(trimmedKey)
+        let manualKey = sanitizedInput ?? GoogleAPIAuth.sanitizeKey(GoogleAPIAuth.loadFromKeychain())
+
+        let keyToValidate: String
         switch preference {
         case .manual:
-            guard let key = sanitizedInput ?? GoogleAPIAuth.sanitizeKey(GoogleAPIAuth.loadFromKeychain()) else {
-                return nil
-            }
-            let cached = (mode == .auto) ? GoogleAPIAuth.cachedAutoResolvedMode(for: key) : nil
-            return GoogleAPIAuthSession(
-                apiKey: key,
-                source: .manualKeychain,
-                resolvedMode: mode.resolve(for: key, cachedAutoMode: cached),
-                configuredMode: mode
-            )
+            guard let manualKey else { return nil }
+            keyToValidate = manualKey
         case .automatic:
-            if let loaded = GoogleAPIAuth.load(preference: .automatic, mode: mode) {
+            if let loaded = GoogleAPIAuth.load(preference: .automatic, mode: mode),
+               loaded.source != .manualKeychain || sanitizedInput == nil {
                 return loaded
             }
-            guard let key = sanitizedInput else { return nil }
-            let cached = (mode == .auto) ? GoogleAPIAuth.cachedAutoResolvedMode(for: key) : nil
-            return GoogleAPIAuthSession(
-                apiKey: key,
-                source: .manualKeychain,
-                resolvedMode: mode.resolve(for: key, cachedAutoMode: cached),
-                configuredMode: mode
-            )
+            guard let manualKey else { return nil }
+            keyToValidate = manualKey
         }
+
+        let cached = (mode == .auto) ? GoogleAPIAuth.cachedAutoResolvedMode(for: keyToValidate) : nil
+        return GoogleAPIAuthSession(
+            apiKey: keyToValidate,
+            source: .manualKeychain,
+            resolvedMode: mode.resolve(for: keyToValidate, cachedAutoMode: cached),
+            configuredMode: mode
+        )
     }
 
     private func saveAndDismiss() {
@@ -497,19 +495,11 @@ struct GoogleAPICredentialSheet: View {
                     }
                 case .failure(let error) where !error.isNetworkFailure:
                     isSaving = false
-                    if GoogleAPIQuotaClient.isServiceBlockedError(error) && mode == .vertexExpress {
-                        validationMessage = tr(
-                            "Vertex AI is blocked for this key (API_KEY_SERVICE_BLOCKED). Switch to Auto / AI Studio, or allow Vertex AI API in Google Cloud key restrictions.",
-                            "该 Key 被限制访问 Vertex AI（API_KEY_SERVICE_BLOCKED）。请改选「自动识别 / AI Studio」，或在 GCP 凭据页解除该 Key 的 API 限制。"
-                        )
-                    } else if GoogleAPIQuotaClient.isServiceBlockedError(error) {
-                        validationMessage = tr(
-                            "API service blocked for \(candidate.resolvedMode.displayLabel) — check Google Cloud API restrictions.",
-                            "该 Key 未开通 \(candidate.resolvedMode.displayLabel) 权限，请检查 GCP API 限制。"
-                        )
-                    } else {
-                        validationMessage = error.userMessage
-                    }
+                    validationMessage = appState.googleAPIAuthFailureMessage(
+                        error,
+                        mode: candidate.resolvedMode,
+                        configuredMode: mode
+                    )
                     return
                 case .failure:
                     break
