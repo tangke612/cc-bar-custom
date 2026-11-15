@@ -72,7 +72,7 @@ struct GoogleAPICredentialSheet: View {
                 Text(validationMessage)
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
-                    .lineLimit(2)
+                    .lineLimit(3)
             }
             Spacer()
             Button(tr("Cancel", "取消")) {
@@ -443,6 +443,35 @@ struct GoogleAPICredentialSheet: View {
         return "\(count)"
     }
 
+    private func candidateSessionForValidation(trimmedKey: String) -> GoogleAPIAuthSession? {
+        let sanitizedInput = GoogleAPIAuth.sanitizeKey(trimmedKey)
+        switch preference {
+        case .manual:
+            guard let key = sanitizedInput ?? GoogleAPIAuth.sanitizeKey(GoogleAPIAuth.loadFromKeychain()) else {
+                return nil
+            }
+            let cached = (mode == .auto) ? GoogleAPIAuth.cachedAutoResolvedMode(for: key) : nil
+            return GoogleAPIAuthSession(
+                apiKey: key,
+                source: .manualKeychain,
+                resolvedMode: mode.resolve(for: key, cachedAutoMode: cached),
+                configuredMode: mode
+            )
+        case .automatic:
+            if let loaded = GoogleAPIAuth.load(preference: .automatic, mode: mode) {
+                return loaded
+            }
+            guard let key = sanitizedInput else { return nil }
+            let cached = (mode == .auto) ? GoogleAPIAuth.cachedAutoResolvedMode(for: key) : nil
+            return GoogleAPIAuthSession(
+                apiKey: key,
+                source: .manualKeychain,
+                resolvedMode: mode.resolve(for: key, cachedAutoMode: cached),
+                configuredMode: mode
+            )
+        }
+    }
+
     private func saveAndDismiss() {
         validationMessage = nil
         guard let dailyBudget = parseBudget(dailyBudgetText),
@@ -458,30 +487,58 @@ struct GoogleAPICredentialSheet: View {
         }
 
         isSaving = true
-        let settings = SettingsStore.shared
-        settings.googleAPICredentialPreference = preference
-        settings.googleAPIMode = mode
-        settings.googleAPIDailyBudgetUSD = dailyBudget
-        settings.googleAPIMonthlyBudgetUSD = monthlyBudget
-        settings.googleAPIDefaultDirectory = defaultDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
-        settings.googleAPIDefaultModel = defaultModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        settings.googleAPIYoloEnabled = yoloEnabled
-        settings.googleAPIHotKeyEnabled = hotKeyEnabled
-        settings.googleAPIHotKeyPreset = hotKeyPreset
-
-        if !trimmedKey.isEmpty {
-            GoogleAPIAuth.saveToKeychain(apiKey: trimmedKey)
-        }
-
         Task {
+            if let candidate = candidateSessionForValidation(trimmedKey: trimmedKey) {
+                let check = await GoogleAPIQuotaClient.validateKey(session: candidate)
+                switch check {
+                case .success(let actualMode):
+                    if mode == .auto {
+                        GoogleAPIAuth.rememberAutoResolvedMode(actualMode, for: candidate.apiKey)
+                    }
+                case .failure(let error) where !error.isNetworkFailure:
+                    isSaving = false
+                    if GoogleAPIQuotaClient.isServiceBlockedError(error) && mode == .vertexExpress {
+                        validationMessage = tr(
+                            "Vertex AI is blocked for this key (API_KEY_SERVICE_BLOCKED). Switch to Auto / AI Studio, or allow Vertex AI API in Google Cloud key restrictions.",
+                            "该 Key 被限制访问 Vertex AI（API_KEY_SERVICE_BLOCKED）。请改选「自动识别 / AI Studio」，或在 GCP 凭据页解除该 Key 的 API 限制。"
+                        )
+                    } else if GoogleAPIQuotaClient.isServiceBlockedError(error) {
+                        validationMessage = tr(
+                            "API service blocked for \(candidate.resolvedMode.displayLabel) — check Google Cloud API restrictions.",
+                            "该 Key 未开通 \(candidate.resolvedMode.displayLabel) 权限，请检查 GCP API 限制。"
+                        )
+                    } else {
+                        validationMessage = error.userMessage
+                    }
+                    return
+                case .failure:
+                    break
+                }
+            }
+
+            let settings = SettingsStore.shared
+            settings.googleAPICredentialPreference = preference
+            settings.googleAPIMode = mode
+            settings.googleAPIDailyBudgetUSD = dailyBudget
+            settings.googleAPIMonthlyBudgetUSD = monthlyBudget
+            settings.googleAPIDefaultDirectory = defaultDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+            settings.googleAPIDefaultModel = defaultModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            settings.googleAPIYoloEnabled = yoloEnabled
+            settings.googleAPIHotKeyEnabled = hotKeyEnabled
+            settings.googleAPIHotKeyPreset = hotKeyPreset
+
+            if !trimmedKey.isEmpty {
+                GoogleAPIAuth.saveToKeychain(apiKey: trimmedKey)
+            }
+
             await appState.loadGoogleAPI()
             if appState.googleAPIAccount != nil, !settings.isProviderEnabled(.googleAPI) {
                 settings.setServiceEnabled(true, for: .googleAPI)
             }
-            await appState.refreshGoogleAPILocalUsageIfNeeded(rebuildSnapshot: true)
             if settings.isProviderEnabled(.googleAPI) {
                 await appState.refreshQuotas(reason: .userInitiated)
             }
+            await appState.refreshGoogleAPILocalUsageIfNeeded()
             isSaving = false
             dismiss()
         }

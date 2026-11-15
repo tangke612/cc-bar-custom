@@ -2693,17 +2693,18 @@ final class AppState {
         }
     }
 
-    func refreshGoogleAPILocalUsageIfNeeded(rebuildSnapshot: Bool = false) async {
+    func refreshGoogleAPILocalUsageIfNeeded() async {
         guard beginStateOperation() else { return }
         defer { activeStateOperations -= 1 }
-        guard SettingsStore.shared.isProviderEnabled(.googleAPI) || rebuildSnapshot else { return }
+        guard SettingsStore.shared.isProviderEnabled(.googleAPI) else { return }
 
         let summary = await GoogleAPILocalUsage.shared.scan()
         googleAPIUsageSummary = summary
 
-        guard let session = googleAPIAccount else { return }
-        let existingSnapshot = googleAPIQuota
-        guard rebuildSnapshot || existingSnapshot != nil else { return }
+        guard let session = googleAPIAccount,
+              let existingSnapshot = googleAPIQuota,
+              googleAPIQuotaError == nil
+        else { return }
 
         let dailyBudget = SettingsStore.shared.googleAPIDailyBudgetUSD
         let monthlyBudget = SettingsStore.shared.googleAPIMonthlyBudgetUSD
@@ -2712,9 +2713,14 @@ final class AppState {
             usage: summary,
             dailyBudgetUSD: dailyBudget,
             monthlyBudgetUSD: monthlyBudget,
-            now: existingSnapshot?.fetchedAt ?? Date()
+            now: existingSnapshot.fetchedAt
         )
-        storeQuota(.googleAPI, snapshot: updated, source: googleAPIQuotaSource ?? .api)
+        googleAPIQuota = updated
+        if var cached = quotaCache.providers[.googleAPI] {
+            cached.snapshot = updated
+            quotaCache.providers[.googleAPI] = cached
+            saveQuotaCache()
+        }
         if updated.isUnlimited != true {
             observePrimaryQuota(updated, settingsVersion: SettingsStore.shared.quotaAlertRuntimeVersion)
         }
