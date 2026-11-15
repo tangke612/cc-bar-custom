@@ -1,5 +1,6 @@
 import XCTest
 import SQLite3
+import AppKit
 @testable import CCBar
 
 final class SessionResumeTests: XCTestCase {
@@ -190,19 +191,164 @@ final class SessionResumeTests: XCTestCase {
         XCTAssertEqual(cliRecord.firstPrompt, "帮我检查 AGENTS.md")
         XCTAssertEqual(cliRecord.latestPrompt, "生成可运行的 Release 包")
         XCTAssertEqual(
-            cliRecord.resumeCommand.command,
+            cliRecord.resumeCommand(mode: .standard).command,
             "cd '\(realProjectDir.standardizedFileURL.path)' && agy --conversation \(cliID)"
         )
 
         let deskRecord = try XCTUnwrap(byKey["antigravity:\(deskID)"])
         XCTAssertEqual(deskRecord.origin, .antigravityDesktop)
         XCTAssertEqual(deskRecord.projectName, "MyDeskApp")
-        XCTAssertEqual(deskRecord.resumeCommand.command, "cd '\(deskProjectPath)' && agy")
+        try FileManager.default.createDirectory(atPath: deskProjectPath, withIntermediateDirectories: true)
+        XCTAssertEqual(deskRecord.resumeCommand(mode: .standard).command, "cd '\(deskProjectPath)' && agy")
 
         // 增量缓存验证：文件未变动时二次扫描状态与结果完全一致
         let secondScan = SessionHistoryScanner.scan(previous: firstScan.state, roots: roots)
         XCTAssertEqual(secondScan.state, firstScan.state)
         XCTAssertEqual(secondScan.records, firstScan.records)
+    }
+
+    // MARK: - Permission Inheritance
+
+    func testCodexPermissionFlags() {
+        let yolo = SessionLaunchPermission(codexApproval: "never", codexSandbox: "danger-full-access")
+        XCTAssertEqual(
+            SessionResumeCommand.build(origin: .codex, sessionID: "id1", cwd: nil, permission: yolo, mode: .inherit).command,
+            "codex resume --dangerously-bypass-approvals-and-sandbox id1"
+        )
+        let mixed = SessionLaunchPermission(codexApproval: "on-request", codexSandbox: "danger-full-access")
+        XCTAssertEqual(
+            SessionResumeCommand.build(origin: .codex, sessionID: "id1", cwd: nil, permission: mixed, mode: .inherit).command,
+            "codex resume -s danger-full-access -a on-request id1"
+        )
+        XCTAssertEqual(
+            SessionResumeCommand.build(origin: .codex, sessionID: "id1", cwd: nil, permission: mixed, mode: .standard).command,
+            "codex resume id1"
+        )
+        XCTAssertEqual(
+            SessionResumeCommand.build(origin: .codex, sessionID: "id1", cwd: nil, permission: nil, mode: .fullAccess).command,
+            "codex resume --dangerously-bypass-approvals-and-sandbox id1"
+        )
+        // 未知取值不拼接，避免生成 CLI 不认识的参数
+        let unknown = SessionLaunchPermission(codexApproval: "granular", codexSandbox: "external")
+        XCTAssertEqual(
+            SessionResumeCommand.build(origin: .codex, sessionID: "id1", cwd: nil, permission: unknown, mode: .inherit).command,
+            "codex resume id1"
+        )
+    }
+
+    func testAgyAndClaudePermissionFlags() {
+        let skip = SessionLaunchPermission(skipsPermissions: true)
+        XCTAssertEqual(
+            SessionResumeCommand.build(origin: .antigravityCLI, sessionID: "c1", cwd: "/tmp", permission: skip, mode: .inherit).command,
+            "cd '/tmp' && agy --dangerously-skip-permissions --conversation c1"
+        )
+        let inferred = SessionLaunchPermission(skipsPermissions: true, isInferred: true)
+        let desk = SessionResumeCommand.build(origin: .antigravityDesktop, sessionID: "d1", cwd: nil, permission: inferred, mode: .inherit)
+        XCTAssertEqual(desk.command, "agy --dangerously-skip-permissions")
+        XCTAssertEqual(desk.permissionSource, .inferred)
+        let noSkip = SessionLaunchPermission(skipsPermissions: false)
+        XCTAssertEqual(
+            SessionResumeCommand.build(origin: .antigravityCLI, sessionID: "c1", cwd: nil, permission: noSkip, mode: .inherit).command,
+            "agy --conversation c1"
+        )
+        let claudeBypass = SessionLaunchPermission(skipsPermissions: true, claudePermissionMode: "bypassPermissions")
+        XCTAssertEqual(
+            SessionResumeCommand.build(origin: .claudeCode, sessionID: "s1", cwd: nil, permission: claudeBypass, mode: .inherit).command,
+            "claude --dangerously-skip-permissions --resume s1"
+        )
+        let claudeEdits = SessionLaunchPermission(skipsPermissions: false, claudePermissionMode: "acceptEdits")
+        XCTAssertEqual(
+            SessionResumeCommand.build(origin: .claudeCode, sessionID: "s1", cwd: nil, permission: claudeEdits, mode: .inherit).command,
+            "claude --permission-mode acceptEdits --resume s1"
+        )
+    }
+
+    func testAgyLaunchLogAndClaudeScanning() throws {
+        let fakeHome = tempDir.appendingPathComponent("home2", isDirectory: true)
+        let project = fakeHome.appendingPathComponent("work/demo", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+
+        // agy 启动日志：第一份带 YOLO 打开 aaaa…，第二份普通启动续接 bbbb…
+        let logDir = fakeHome.appendingPathComponent(".gemini/antigravity-cli/log", isDirectory: true)
+        try FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
+        let idA = "aaaaaaaa-1111-2222-3333-444444444444"
+        let idB = "bbbbbbbb-1111-2222-3333-444444444444"
+        try """
+        I1115 07:22:53.116960       1 overrides.go:64] --dangerously-skip-permissions: auto-approving all tool permissions
+        I1115 07:23:11.094856    1091 server.go:1242] Created conversation \(idA) (backend=BACKEND_TYPE_UNSPECIFIED)
+        """.write(to: logDir.appendingPathComponent("cli-20261115_072253.log"), atomically: true, encoding: .utf8)
+        try """
+        I1115 08:00:00.000000       1 common.go:477] Resuming conversation \(idB)
+        """.write(to: logDir.appendingPathComponent("cli-20261115_080000.log"), atomically: true, encoding: .utf8)
+
+        var state = SessionHistoryCacheState()
+        let roots = SessionHistoryRoots(
+            codexHome: fakeHome.appendingPathComponent(".codex"),
+            antigravityRoots: [],
+            homePath: fakeHome.path,
+            claudeProjects: fakeHome.appendingPathComponent(".claude/projects"),
+            agyLogDirectory: logDir
+        )
+        let index = SessionHistoryScanner.scanAgyLaunchLogs(roots: roots, state: &state)
+        XCTAssertEqual(index.byConversation[idA], true)
+        XCTAssertEqual(index.byConversation[idB], false)
+        XCTAssertEqual(index.latestLaunchSkips, false)
+
+        // Claude Code 会话
+        let claudeDir = fakeHome.appendingPathComponent(".claude/projects/-work-demo", isDirectory: true)
+        try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+        let sid = "b07ea708-6e63-4aae-b07d-75c82bfe6ed8"
+        let lines = [
+            #"{"type":"user","sessionId":"\#(sid)","cwd":"\#(project.path)","gitBranch":"main","permissionMode":"bypassPermissions","timestamp":"2026-11-15T01:00:00.000Z","message":{"role":"user","content":"修复回归测试"}}"#,
+            #"{"type":"user","sessionId":"\#(sid)","cwd":"\#(project.path)","timestamp":"2026-11-15T01:05:00.000Z","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}"#,
+            #"{"type":"user","sessionId":"\#(sid)","cwd":"\#(project.path)","timestamp":"2026-11-15T01:06:00.000Z","message":{"role":"user","content":"再跑一遍"}}"#,
+        ]
+        try lines.joined(separator: "\n").write(to: claudeDir.appendingPathComponent("\(sid).jsonl"), atomically: true, encoding: .utf8)
+
+        let scan = SessionHistoryScanner.scan(previous: nil, roots: roots)
+        let claude = try XCTUnwrap(scan.records.first { $0.key == "claude:\(sid)" })
+        XCTAssertEqual(claude.origin, .claudeCode)
+        XCTAssertEqual(claude.cwd, project.standardizedFileURL.path)
+        XCTAssertEqual(claude.gitBranch, "main")
+        XCTAssertEqual(claude.firstPrompt, "修复回归测试")
+        XCTAssertEqual(claude.latestPrompt, "再跑一遍")
+        XCTAssertEqual(
+            claude.resumeCommand(mode: .inherit).command,
+            "cd '\(project.standardizedFileURL.path)' && claude --dangerously-skip-permissions --resume \(sid)"
+        )
+        // 拼音全拼与首字母检索
+        XCTAssertTrue(claude.matches(lowercasedQuery: "huiguiceshi"))
+        XCTAssertTrue(claude.matches(lowercasedQuery: "hgcs"))
+        XCTAssertFalse(claude.matches(lowercasedQuery: "zzzz"))
+    }
+
+    func testMissingCwdDropsCdPrefix() {
+        let record = SessionHistoryRecord(
+            key: "codex:x", sessionID: "x", origin: .codex,
+            cwd: "/definitely/not/here/\(UUID().uuidString)", projectName: "here",
+            lastActiveAt: Date(), createdAt: nil, title: nil, summary: nil,
+            firstPrompt: nil, latestPrompt: nil, isSubagent: false
+        )
+        XCTAssertTrue(record.cwdIsMissing)
+        XCTAssertEqual(record.resumeCommand(mode: .standard).command, "codex resume x")
+    }
+
+    // MARK: - Hover Geometry
+
+    func testHoverZoneGeometry() {
+        let visible = NSRect(x: 0, y: 0, width: 1440, height: 875)
+        let anchor = NSRect(x: 1300, y: 876, width: 60, height: 24)
+        let frame = HoverZoneGeometry.panelFrame(contentSize: NSSize(width: 340, height: 400), anchor: anchor, screenVisibleFrame: visible)
+        XCTAssertEqual(frame.maxX, 1432, "靠右图标面板应夹紧到屏幕右边距")
+        XCTAssertEqual(frame.maxY, 870)
+        XCTAssertEqual(frame.height, 400)
+
+        XCTAssertTrue(HoverZoneGeometry.isInActiveZone(cursor: NSPoint(x: 1330, y: 888), anchor: anchor, panel: frame))
+        XCTAssertTrue(HoverZoneGeometry.isInActiveZone(cursor: NSPoint(x: 1330, y: 873), anchor: anchor, panel: frame), "图标与面板之间的缝隙算在热区内")
+        XCTAssertTrue(HoverZoneGeometry.isInActiveZone(cursor: NSPoint(x: 1200, y: 600), anchor: anchor, panel: frame))
+        XCTAssertFalse(HoverZoneGeometry.isInActiveZone(cursor: NSPoint(x: 1000, y: 888), anchor: anchor, panel: frame), "沿菜单栏移到别处应判定离开")
+        XCTAssertFalse(HoverZoneGeometry.isInActiveZone(cursor: NSPoint(x: 1200, y: 300), anchor: anchor, panel: frame), "移到面板下方应判定离开")
+        XCTAssertFalse(HoverZoneGeometry.isInActiveZone(cursor: NSPoint(x: 1200, y: 600), anchor: anchor, panel: nil))
     }
 
     // MARK: - SQLite Fixture Helper

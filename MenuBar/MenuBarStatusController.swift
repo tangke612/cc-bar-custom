@@ -1,9 +1,10 @@
 import AppKit
+import Carbon.HIToolbox
 import Observation
 import QuartzCore
 import SwiftUI
 
-// MARK: - Observable Popover Interaction State
+// MARK: - Observable Panel Interaction State
 
 @Observable
 @MainActor
@@ -13,55 +14,52 @@ final class MenuBarPopoverState {
     var isSearchFocused: Bool = false
     var desktopResumeHintVisible: Bool = false
     var searchText: String = ""
+    /// 键盘 ↑↓ 选中的快捷会话行（nil 表示未选中）。
+    var keyboardSelection: Int?
+    /// 每次按回车复制时递增，快捷区据此复制选中行。
+    var copySelectionToken: Int = 0
+    /// 每次请求聚焦搜索框时递增（全局快捷键打开）。
+    var focusSearchToken: Int = 0
 }
 
 // MARK: - MenuBarStatusController
 
-/// AppKit 状态栏控制器（`NSStatusItem` + `NSPopover`）及主窗口/欢迎窗管理：
-/// - 悬停状态栏图标满 150ms 自动弹出面板，严禁调用 `NSApp.activate`，保护终端输入焦点；
-/// - 移出状态栏图标且未停留在 Popover 区域满 250ms 自动收起面板；
-/// - 左键点击状态栏图标切换“固定面板”状态，或点击搜索框检索时调用 `NSApp.activate` 获取输入焦点并暂停自动收起；
-/// - 再次点击状态栏图标或按 `Esc` 取消固定并收起面板。
+/// 菜单栏状态项 + 自绘悬停面板（`QuotaHoverPanel`）控制器：
+/// - 悬停图标满「弹出延迟」（默认 150ms）后弹出面板，全程不激活 CCBar，终端保持键盘焦点；
+/// - 鼠标离开「图标 + 衔接带 + 面板」满「收起延迟」（默认 250ms）自动收起——不论面板是悬停还是点击打开的；
+/// - 只有点面板右上角的图钉（或设置里开启「点击图标即固定」）才会固定面板，固定后不随鼠标离开收起；
+/// - 点击图标切换显示 / 收起，`Esc` 收起，未固定时点击面板外任意位置也会收起；
+/// - 全局快捷键 ⌃⌥K 打开面板并聚焦会话搜索。
 @MainActor
-final class MenuBarStatusController: NSObject, NSPopoverDelegate {
+final class MenuBarStatusController: NSObject {
     static let shared = MenuBarStatusController()
 
-    nonisolated static let hoverOpenDelayNanoseconds: UInt64 = 150_000_000
-    nonisolated static let hoverCloseDelayNanoseconds: UInt64 = 250_000_000
-    nonisolated static let hoverPollIntervalNanoseconds: UInt64 = 50_000_000
+    nonisolated static let hoverPollIntervalNanoseconds: UInt64 = 40_000_000
+    /// 搜索框聚焦时的最短收起延迟，避免打字过程中鼠标轻微移出就收起。
+    static let searchFocusedMinimumCloseDelayMs = 1200
 
     let popoverState = MenuBarPopoverState()
+    let windows = AppWindowManager()
 
     private var statusItem: NSStatusItem?
-    private let popover = NSPopover()
-    private var popoverViewController: PopoverContainerViewController?
     private var buttonTrackingResponder: StatusButtonTrackingResponder?
-    private var buttonTrackingArea: NSTrackingArea?
-
+    private var panel: QuotaHoverPanel?
+    private var contentController: QuotaPanelContentController?
     private weak var appState: AppState?
-    private var mainWindow: NSWindow?
-    private var mainWindowCloseObserver: NSObjectProtocol?
-    private var onboardingWindow: NSWindow?
-    private var onboardingWindowCloseObserver: NSObjectProtocol?
-    private var appResignActiveObserver: NSObjectProtocol?
     private var settingsObserversConfigured = false
 
-    private var isHoveringStatusButton = false
-    private var isHoveringPopover = false
     private var suppressHoverOpenUntilExit = false
-
+    private var openedByHoverAt: Date?
+    private var isClosing = false
     private var transitionGeneration: UInt64 = 0
-    private var isAnimatingOpen = false
-    private var isClosingAnimated = false
-    private var targetPopoverFrame: NSRect?
-    private var pendingContentSize: NSSize?
+    private var targetFrame: NSRect?
 
     private var hoverOpenTask: Task<Void, Never>?
-    private var hoverCloseTask: Task<Void, Never>?
     private var hoverWatchTask: Task<Void, Never>?
     private var badgeRefreshScheduled = false
     private var localKeyMonitor: Any?
     private var globalMouseDownMonitor: Any?
+    private var hotKey: GlobalHotKey?
 
     private override init() {
         super.init()
@@ -70,14 +68,16 @@ final class MenuBarStatusController: NSObject, NSPopoverDelegate {
     func attach(appState: AppState) {
         guard !AppRuntime.isRunningUnitTests else { return }
         self.appState = appState
+        windows.attach(appState: appState)
         setupStatusItemIfNeeded()
-        setupPopoverIfNeeded(appState: appState)
+        setupPanelIfNeeded(appState: appState)
         observeBadgeInputs()
         observeOnboardingAndNotificationSettingsIfNeeded()
+        observeHotKeySetting()
         updateStatusButtonBadge()
     }
 
-    // MARK: - Setup NSStatusItem & NSTrackingArea
+    // MARK: - Setup
 
     private func setupStatusItemIfNeeded() {
         guard statusItem == nil else { return }
@@ -91,7 +91,6 @@ final class MenuBarStatusController: NSObject, NSPopoverDelegate {
             button.action = #selector(handleStatusItemClick(_:))
             button.sendAction(on: [.leftMouseUp])
 
-            // 在 statusItem.button 上挂载 NSTrackingArea（启用 mouseEnteredAndExited、activeAlways、inVisibleRect）
             let responder = StatusButtonTrackingResponder(
                 onMouseEntered: { [weak self] in self?.handleStatusButtonMouseEntered() },
                 onMouseExited: { [weak self] in self?.handleStatusButtonMouseExited() }
@@ -103,15 +102,14 @@ final class MenuBarStatusController: NSObject, NSPopoverDelegate {
                 userInfo: nil
             )
             button.addTrackingArea(area)
-            self.buttonTrackingResponder = responder
-            self.buttonTrackingArea = area
+            buttonTrackingResponder = responder
         }
 
-        self.statusItem = item
+        statusItem = item
     }
 
-    private func setupPopoverIfNeeded(appState: AppState) {
-        guard popoverViewController == nil else { return }
+    private func setupPanelIfNeeded(appState: AppState) {
+        guard panel == nil else { return }
 
         let rootView = AnyView(
             PopoverRootView()
@@ -119,29 +117,38 @@ final class MenuBarStatusController: NSObject, NSPopoverDelegate {
                 .environment(popoverState)
                 .environment(\.controlActiveState, .key)
         )
-        let controller = PopoverContainerViewController(
+        let controller = QuotaPanelContentController(
             rootView: rootView,
-            shouldPreventActivation: { [weak self] in
-                guard let self else { return true }
-                return !self.popoverState.isPinned && !self.popoverState.isSearchFocused
-            },
-            onHoverChanged: { [weak self] hovering in
-                self?.handlePopoverHoverChanged(hovering)
-            },
-            onSizeChanged: { [weak self] newSize in
-                self?.applyPopoverContentSize(newSize)
-            },
-            onCancelOperation: { [weak self] in
-                self?.handleEscapeKey()
+            onHoverChanged: { _ in },
+            onFittingSizeChanged: { [weak self] size in
+                self?.handleContentSizeChange(size)
             }
         )
+        let panel = QuotaHoverPanel()
+        panel.contentViewController = controller
+        panel.onCancel = { [weak self] in self?.handleEscapeKey() }
+        self.panel = panel
+        self.contentController = controller
+    }
 
-        popover.contentViewController = controller
-        popover.behavior = .applicationDefined
-        // 关闭系统默认生硬回弹与非激活态 0ms 硬切关闭，改由 GPU 窗口 alpha + 位移缓动曲线接管
-        popover.animates = false
-        popover.delegate = self
-        self.popoverViewController = controller
+    private func observeHotKeySetting() {
+        withObservationTracking {
+            _ = SettingsStore.shared.quickPanelHotKeyEnabled
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.observeHotKeySetting()
+            }
+        }
+        if SettingsStore.shared.quickPanelHotKeyEnabled {
+            if hotKey == nil {
+                hotKey = GlobalHotKey(keyCode: kVK_ANSI_K, modifiers: controlKey | optionKey) { [weak self] in
+                    self?.handleGlobalHotKey()
+                }
+            }
+            hotKey?.register()
+        } else {
+            hotKey?.unregister()
+        }
     }
 
     // MARK: - Reactive Menu Bar Badge & Settings Observation
@@ -159,8 +166,7 @@ final class MenuBarStatusController: NSObject, NSPopoverDelegate {
             }
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.scheduleBadgeRefresh()
+                self?.scheduleBadgeRefresh()
             }
         }
     }
@@ -231,12 +237,11 @@ final class MenuBarStatusController: NSObject, NSPopoverDelegate {
         let snapshots = Dictionary(uniqueKeysWithValues: QuotaApp.allCases.compactMap { app in
             appState.quotaSnapshot(for: app).map { (app, $0) }
         })
-        let image = MenuBarBadgeImage.make(
+        button.image = MenuBarBadgeImage.make(
             providers: visibleProviders,
             snapshots: snapshots,
             window: settings.menuBarWindow
         )
-        button.image = image
         button.setAccessibilityLabel(MenuBarBadgeImage.accessibilityLabel(
             providers: visibleProviders,
             snapshots: snapshots,
@@ -244,113 +249,89 @@ final class MenuBarStatusController: NSObject, NSPopoverDelegate {
         ))
     }
 
-    // MARK: - Hover Debounce (150ms Open / 250ms Auto-Close)
+    // MARK: - Hover Open
+
+    private var isPanelVisible: Bool {
+        panel?.isVisible == true && !isClosing
+    }
 
     private func handleStatusButtonMouseEntered() {
-        isHoveringStatusButton = true
-        suppressHoverOpenUntilExit = false
-        hoverCloseTask?.cancel()
-        hoverCloseTask = nil
-
-        if popover.isShown && isClosingAnimated {
-            cancelAnimatedCloseAndRestore()
+        if isClosing {
+            // 收起动画途中鼠标回到图标：直接拉回。
+            restoreFromClosing()
             return
         }
+        guard !isPanelVisible,
+              !suppressHoverOpenUntilExit,
+              SettingsStore.shared.popoverHoverOpenEnabled
+        else { return }
 
-        guard !popover.isShown else { return }
+        let delayMs = max(0, SettingsStore.shared.popoverHoverOpenDelayMs)
         hoverOpenTask?.cancel()
         hoverOpenTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: Self.hoverOpenDelayNanoseconds)
+            if delayMs > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
+            }
             guard !Task.isCancelled, let self else { return }
-            guard (!self.popover.isShown || self.isClosingAnimated),
+            guard !self.isPanelVisible,
                   !self.suppressHoverOpenUntilExit,
-                  self.isCursorInsideStatusButton()
+                  self.isCursorOverStatusButton()
             else { return }
-            self.showPopover(pinned: false, activateApp: false)
+            self.openedByHoverAt = Date()
+            self.showPanel(pinned: false)
         }
     }
 
     private func handleStatusButtonMouseExited() {
-        isHoveringStatusButton = false
         suppressHoverOpenUntilExit = false
         hoverOpenTask?.cancel()
         hoverOpenTask = nil
-        scheduleHoverAutoCloseIfNeeded()
     }
 
-    private func handlePopoverHoverChanged(_ hovering: Bool) {
-        isHoveringPopover = hovering
-        if hovering {
-            hoverCloseTask?.cancel()
-            hoverCloseTask = nil
-            if popover.isShown && isClosingAnimated && !suppressHoverOpenUntilExit {
-                cancelAnimatedCloseAndRestore()
-            }
-        } else {
-            scheduleHoverAutoCloseIfNeeded()
-        }
-    }
+    // MARK: - Auto-Close Watcher
 
-    private func scheduleHoverAutoCloseIfNeeded(delayNanoseconds: UInt64 = hoverCloseDelayNanoseconds) {
-        guard popover.isShown,
-              !isClosingAnimated,
-              !popoverState.isPinned,
-              !popoverState.isSearchFocused
-        else { return }
-
-        hoverCloseTask?.cancel()
-        hoverCloseTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: delayNanoseconds)
-            guard !Task.isCancelled, let self else { return }
-            guard self.popover.isShown,
-                  !self.isClosingAnimated,
-                  !self.popoverState.isPinned,
-                  !self.popoverState.isSearchFocused
-            else { return }
-
-            if self.isCursorInActiveHoverZone() {
-                return
-            }
-
-            self.closePopover(animated: true)
-        }
-    }
-
-    /// 仅在 Popover 显示期间运行的轻量屏幕光标守卫（50ms 采样，面板关闭后立即取消，后台零 CPU 开销）。
-    /// 彻底规避非激活 `.accessory` 状态下 `NSStatusBarWindow` / `NSHostingView` 偶发漏发 `mouseExited` 导致面板不自动消失的问题：
-    /// 只要未处于固定态或搜索聚焦态，且光标连续离开「状态栏图标 + 衔接区 + Popover 窗口」满 250ms，即确定性自动收起。
+    /// 仅在面板显示期间运行（40ms 采样，收起后立即取消）。直接比较 `NSEvent.mouseLocation` 与几何热区，
+    /// 不依赖 `mouseExited`——非激活状态下系统会漏发该事件，这是之前「移开不消失」的根因。
     private func startHoverWatchLoop() {
         hoverWatchTask?.cancel()
         hoverWatchTask = Task { @MainActor [weak self] in
             var outsideSince: ContinuousClock.Instant?
-            let closeThreshold = Duration.nanoseconds(Int64(Self.hoverCloseDelayNanoseconds))
-
+            var tick = 0
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: Self.hoverPollIntervalNanoseconds)
-                guard !Task.isCancelled, let self, self.popover.isShown, !self.isClosingAnimated else { return }
+                guard !Task.isCancelled, let self, self.isPanelVisible else { return }
 
-                if self.popoverState.isPinned || self.popoverState.isSearchFocused {
+                tick &+= 1
+                if tick % 8 == 0 {
+                    self.syncPanelSizeIfNeeded()
+                }
+
+                if self.popoverState.isPinned {
                     outsideSince = nil
                     continue
                 }
 
-                if self.isCursorInActiveHoverZone() {
+                if self.isCursorInActiveZone() {
                     outsideSince = nil
-                    self.hoverCloseTask?.cancel()
-                    self.hoverCloseTask = nil
-                } else {
-                    let now = ContinuousClock.now
-                    if let since = outsideSince {
-                        if now - since >= closeThreshold {
-                            self.closePopover(animated: true)
-                            return
-                        }
-                    } else {
-                        outsideSince = now
-                    }
+                    continue
+                }
+
+                let now = ContinuousClock.now
+                guard let since = outsideSince else {
+                    outsideSince = now
+                    continue
+                }
+                if now - since >= .milliseconds(self.effectiveCloseDelayMs) {
+                    self.closePanel(animated: true)
+                    return
                 }
             }
         }
+    }
+
+    private var effectiveCloseDelayMs: Int {
+        let base = max(100, SettingsStore.shared.popoverAutoCloseDelayMs)
+        return popoverState.isSearchFocused ? max(base, Self.searchFocusedMinimumCloseDelayMs) : base
     }
 
     private func stopHoverWatchLoop() {
@@ -358,448 +339,254 @@ final class MenuBarStatusController: NSObject, NSPopoverDelegate {
         hoverWatchTask = nil
     }
 
-    // MARK: - Click Pinning, Search Focus & Escape Handling
+    // MARK: - Click, Pin, Search Focus, Escape, HotKey
 
     @objc private func handleStatusItemClick(_ sender: Any?) {
         hoverOpenTask?.cancel()
         hoverOpenTask = nil
-        hoverCloseTask?.cancel()
-        hoverCloseTask = nil
+        let clickPins = SettingsStore.shared.popoverClickPins
 
-        if popover.isShown && !isClosingAnimated {
-            if popoverState.isPinned || popoverState.isSearchFocused {
-                // 再次左键点击图标：取消固定并丝滑收起面板
-                suppressHoverOpenUntilExit = true
-                closePopover(animated: true)
-            } else {
-                // 悬停态下左键点击图标：切换为“固定面板”态，调用 NSApp.activate 获取输入焦点并暂停自动收起
-                popoverState.isPinned = true
-                syncStatusButtonHighlight()
-                activateAppAndFocusPopoverWindow()
+        if isPanelVisible {
+            // 悬停刚弹出时用户习惯性点一下图标：视为“我要打开”，不收起。
+            if let openedAt = openedByHoverAt, Date().timeIntervalSince(openedAt) < 0.9, !popoverState.isPinned {
+                openedByHoverAt = nil
+                if clickPins { setPinned(true) }
+                return
             }
+            if clickPins && !popoverState.isPinned {
+                setPinned(true)
+                return
+            }
+            suppressHoverOpenUntilExit = true
+            closePanel(animated: true)
         } else {
             suppressHoverOpenUntilExit = false
-            showPopover(pinned: true, activateApp: true)
+            openedByHoverAt = nil
+            showPanel(pinned: clickPins)
         }
     }
 
-    /// 用户主动点击弹窗内的搜索输入框准备打字检索时调用：
-    /// 调用 `NSApp.activate` 获取输入焦点，并在检索期间暂停自动收起（点击弹窗外部或按 Esc 即恢复/收起）。
-    func activateForSearch() {
-        hoverCloseTask?.cancel()
-        hoverCloseTask = nil
-        if isClosingAnimated {
-            cancelAnimatedCloseAndRestore()
+    private func handleGlobalHotKey() {
+        if isPanelVisible {
+            closePanel(animated: true)
+            return
         }
+        // 键盘唤出时鼠标不在图标附近，先固定，避免立刻被自动收起。
+        showPanel(pinned: true)
+        focusSearchField()
+    }
+
+    private func focusSearchField() {
+        guard let panel else { return }
+        panel.makeKey()
         popoverState.isSearchFocused = true
+        popoverState.focusSearchToken &+= 1
+    }
+
+    private func setPinned(_ pinned: Bool) {
+        popoverState.isPinned = pinned
         syncStatusButtonHighlight()
-        activateAppAndFocusPopoverWindow()
+    }
+
+    /// 用户点击面板内搜索框：面板成为 key window 以接收键盘输入（`.nonactivatingPanel`，不激活进程、不抢终端前台）。
+    func activateForSearch() {
+        if isClosing { restoreFromClosing() }
+        popoverState.isSearchFocused = true
+        panel?.makeKey()
     }
 
     func endSearchFocusIfUnpinned() {
-        guard popoverState.isSearchFocused else { return }
         popoverState.isSearchFocused = false
-        if popover.isShown, !popoverState.isPinned, !isCursorInActiveHoverZone() {
-            scheduleHoverAutoCloseIfNeeded()
-        }
     }
 
-    /// 按 Esc 或点击取消固定时恢复收起。
+    /// 按 Esc：清空搜索并收起面板（固定状态也收起）。
     func handleEscapeKey() {
-        guard popover.isShown else { return }
-        popoverState.isPinned = false
-        popoverState.isSearchFocused = false
+        guard isPanelVisible else { return }
         popoverState.searchText = ""
-        syncStatusButtonHighlight()
-        popoverWindow?.makeFirstResponder(nil)
-        closePopover(animated: true)
+        closePanel(animated: true)
     }
 
     func togglePinFromHeader() {
-        if popoverState.isPinned || popoverState.isSearchFocused {
-            popoverState.isPinned = false
-            popoverState.isSearchFocused = false
-            syncStatusButtonHighlight()
-            popoverWindow?.makeFirstResponder(nil)
-            if !isCursorInActiveHoverZone() {
-                scheduleHoverAutoCloseIfNeeded()
-            }
-        } else {
-            popoverState.isPinned = true
-            syncStatusButtonHighlight()
-            activateAppAndFocusPopoverWindow()
-        }
+        setPinned(!popoverState.isPinned)
     }
 
-    // MARK: - Show / Close Popover (GPU Window Alpha + Glide Choreography)
+    // MARK: - Show / Close
 
-    private func applyPopoverContentSize(_ newSize: NSSize) {
-        guard newSize.width > 10, newSize.height > 10 else { return }
-
-        if !popover.isShown {
-            if popover.contentSize != newSize {
-                popover.contentSize = newSize
-            }
-            return
-        }
-
-        guard !isClosingAnimated else { return }
-
-        if isAnimatingOpen {
-            pendingContentSize = newSize
-            return
-        }
-
-        let deltaH = abs(popover.contentSize.height - newSize.height)
-        let deltaW = abs(popover.contentSize.width - newSize.width)
-        guard deltaH > 0.5 || deltaW > 0.5 else { return }
-
-        targetPopoverFrame = nil
-        popover.animates = deltaH > 2
-        popover.contentSize = newSize
-        popover.animates = false
-    }
-
-    private func showPopover(pinned: Bool, activateApp: Bool) {
-        guard let button = statusItem?.button else { return }
+    private func showPanel(pinned: Bool) {
+        guard let panel, let contentController, let anchor = statusButtonScreenRect() else { return }
 
         appState?.sessionHistory.refreshInBackground(minAge: 2.0)
+        transitionGeneration &+= 1
+        let gen = transitionGeneration
+        isClosing = false
 
         popoverState.isPinned = pinned
-        if !pinned {
-            popoverState.isSearchFocused = false
-        }
+        popoverState.isSearchFocused = false
+        popoverState.keyboardSelection = nil
         popoverState.isShown = true
 
-        if popover.isShown {
-            if isClosingAnimated {
-                cancelAnimatedCloseAndRestore()
+        let size = contentController.measureFittingSize()
+        let visible = screenVisibleFrame(for: anchor)
+        let finalFrame = HoverZoneGeometry.panelFrame(contentSize: size, anchor: anchor, screenVisibleFrame: visible)
+        targetFrame = finalFrame
+
+        let startFrame = finalFrame.offsetBy(dx: 0, dy: 6)
+        panel.alphaValue = 0
+        panel.setFrame(startFrame, display: false)
+        // orderFrontRegardless：显示面板但不激活 CCBar，终端保持前台与键盘焦点。
+        panel.orderFrontRegardless()
+        panel.invalidateShadow()
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.18
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.16, 1.0, 0.3, 1.0)
+            panel.animator().alphaValue = 1
+            panel.animator().setFrame(finalFrame, display: true)
+        } completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.transitionGeneration == gen else { return }
+                self.panel?.invalidateShadow()
             }
-            syncStatusButtonHighlight()
-            if activateApp {
-                activateAppAndFocusPopoverWindow()
-            }
-            return
         }
 
-        transitionGeneration &+= 1
-        let gen = transitionGeneration
-        isClosingAnimated = false
-        pendingContentSize = nil
-        popover.animates = false
-
-        if let fit = popoverViewController?.measureFittingSize() {
-            popover.contentSize = fit
-        }
-
-        // 悬停触发 show 时严禁调用 NSApp.activate！
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        popoverViewController?.forceActiveVisualEffectState()
-        installPopoverLifecycleMonitorsIfNeeded()
+        installMonitorsIfNeeded()
         startHoverWatchLoop()
         syncStatusButtonHighlight()
-
-        if let window = popoverWindow {
-            let finalFrame = window.frame
-            targetPopoverFrame = finalFrame
-            // 纯窗口原点平移（尺寸不变，不触发 AutoLayout / SwiftUI 重排，由 WindowServer 120Hz GPU 合成）
-            let startFrame = finalFrame.offsetBy(dx: 0, dy: 7)
-            window.alphaValue = 0
-            window.setFrame(startFrame, display: false)
-            isAnimatingOpen = true
-
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.19
-                context.timingFunction = CAMediaTimingFunction(controlPoints: 0.16, 1.0, 0.3, 1.0)
-                window.animator().alphaValue = 1.0
-                window.animator().setFrame(finalFrame, display: false)
-            } completionHandler: { [weak self] in
-                MainActor.assumeIsolated {
-                    guard let self, self.transitionGeneration == gen else { return }
-                    self.isAnimatingOpen = false
-                    self.targetPopoverFrame = window.frame
-                    if let pending = self.pendingContentSize {
-                        self.pendingContentSize = nil
-                        self.applyPopoverContentSize(pending)
-                    }
-                }
-            }
-        }
-
-        if activateApp {
-            activateAppAndFocusPopoverWindow()
-        }
     }
 
-    private func cancelAnimatedCloseAndRestore() {
-        guard popover.isShown else { return }
+    private func restoreFromClosing() {
+        guard let panel, isClosing, let finalFrame = targetFrame else { return }
         transitionGeneration &+= 1
-        let gen = transitionGeneration
-        isClosingAnimated = false
-        isAnimatingOpen = true
+        isClosing = false
         popoverState.isShown = true
-        installPopoverLifecycleMonitorsIfNeeded()
-        startHoverWatchLoop()
-
-        guard let window = popoverWindow else {
-            isAnimatingOpen = false
-            return
-        }
-
-        let restFrame = targetPopoverFrame ?? window.frame.offsetBy(dx: 0, dy: -4)
-        targetPopoverFrame = restFrame
-
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.15
+            context.duration = 0.14
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.16, 1.0, 0.3, 1.0)
-            window.animator().alphaValue = 1.0
-            window.animator().setFrame(restFrame, display: false)
-        } completionHandler: { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self, self.transitionGeneration == gen else { return }
-                self.isAnimatingOpen = false
-                self.targetPopoverFrame = window.frame
-            }
+            panel.animator().alphaValue = 1
+            panel.animator().setFrame(finalFrame, display: true)
         }
+        installMonitorsIfNeeded()
+        startHoverWatchLoop()
     }
 
-    func closePopover(animated: Bool = true) {
+    func closePopover() {
+        closePanel(animated: false)
+    }
+
+    func closePanel(animated: Bool) {
         hoverOpenTask?.cancel()
         hoverOpenTask = nil
-        hoverCloseTask?.cancel()
-        hoverCloseTask = nil
         stopHoverWatchLoop()
-
-        guard popover.isShown else {
-            finishCloseImmediately()
+        removeMonitors()
+        guard let panel, panel.isVisible else {
+            finishClose()
             return
         }
-
-        guard animated, let window = popoverWindow else {
-            finishCloseImmediately()
+        guard animated else {
+            finishClose()
             return
         }
-
-        guard !isClosingAnimated else { return }
+        guard !isClosing else { return }
 
         transitionGeneration &+= 1
         let gen = transitionGeneration
-        isAnimatingOpen = false
-        isClosingAnimated = true
-        pendingContentSize = nil
+        isClosing = true
         statusItem?.button?.highlight(false)
-
-        let baseFrame = targetPopoverFrame ?? window.frame
-        targetPopoverFrame = baseFrame
-        let exitFrame = baseFrame.offsetBy(dx: 0, dy: 5)
+        let base = targetFrame ?? panel.frame
 
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.155
-            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.25, 0.1, 0.25, 1.0)
-            window.animator().alphaValue = 0.0
-            window.animator().setFrame(exitFrame, display: false)
+            context.duration = 0.14
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0.0, 1.0, 1.0)
+            panel.animator().alphaValue = 0
+            panel.animator().setFrame(base.offsetBy(dx: 0, dy: 4), display: true)
         } completionHandler: { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, self.transitionGeneration == gen else { return }
-                self.finishCloseImmediately()
+                self.finishClose()
             }
         }
     }
 
-    private func finishCloseImmediately() {
-        isAnimatingOpen = false
-        isClosingAnimated = false
-        pendingContentSize = nil
-        targetPopoverFrame = nil
+    private func finishClose() {
+        isClosing = false
+        targetFrame = nil
+        openedByHoverAt = nil
         stopHoverWatchLoop()
-        removePopoverLifecycleMonitors()
-
-        let win = popoverWindow
-        popover.animates = false
-        if popover.isShown {
-            popover.performClose(nil)
+        removeMonitors()
+        if let panel {
+            panel.orderOut(nil)
+            panel.alphaValue = 1
         }
-        win?.alphaValue = 1.0
-
         popoverState.isPinned = false
         popoverState.isSearchFocused = false
         popoverState.isShown = false
         popoverState.desktopResumeHintVisible = false
-        isHoveringPopover = false
+        popoverState.keyboardSelection = nil
         syncStatusButtonHighlight()
     }
 
-    // MARK: - Main Window & Onboarding Window Management (Silent Cold Launch)
+    // MARK: - Content Size Tracking (Keep Top Edge Fixed)
 
-    func openMainWindow(tab: MainTab) {
-        guard let appState else { return }
-        closePopover(animated: false)
-        appState.mainTab = tab
-        NSApp.setActivationPolicy(.regular)
+    private func handleContentSizeChange(_ size: NSSize) {
+        guard isPanelVisible else { return }
+        applyPanelHeight(size.height)
+    }
 
-        if let existing = mainWindow {
-            NSApp.activate(ignoringOtherApps: true)
-            existing.makeKeyAndOrderFront(nil)
-            return
-        }
+    private func syncPanelSizeIfNeeded() {
+        guard let contentController else { return }
+        applyPanelHeight(contentController.measureFittingSize().height)
+    }
 
-        let hosting = NSHostingController(
-            rootView: AnyView(
-                MainWindowRootView()
-                    .environment(appState)
-            )
+    private func applyPanelHeight(_ height: CGFloat) {
+        guard let panel, let anchor = statusButtonScreenRect(), !isClosing else { return }
+        let current = targetFrame ?? panel.frame
+        guard abs(current.height - height) > 0.5 else { return }
+        let visible = screenVisibleFrame(for: anchor)
+        let frame = HoverZoneGeometry.panelFrame(
+            contentSize: NSSize(width: current.width, height: height),
+            anchor: anchor,
+            screenVisibleFrame: visible
         )
-        hosting.sceneBridgingOptions = .all
-
-        let window = NSWindow(contentViewController: hosting)
-        window.title = "CCBar"
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
-        window.toolbarStyle = .unified
-        window.setContentSize(NSSize(width: 1440, height: 900))
-        window.minSize = NSSize(width: 1040, height: 520)
-        window.isReleasedWhenClosed = false
-        if !window.setFrameUsingName("CCBarMainWindow") {
-            window.center()
-        }
-        window.setFrameAutosaveName("CCBarMainWindow")
-
-        if let obs = mainWindowCloseObserver {
-            NotificationCenter.default.removeObserver(obs)
-        }
-        mainWindowCloseObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.willCloseNotification,
-            object: window,
-            queue: .main
-        ) { [weak self] _ in
+        targetFrame = frame
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.16
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().setFrame(frame, display: true)
+        } completionHandler: { [weak self] in
             MainActor.assumeIsolated {
-                guard let self else { return }
-                self.mainWindow = nil
-                if self.onboardingWindow == nil {
-                    NSApp.setActivationPolicy(.accessory)
-                }
+                self?.panel?.invalidateShadow()
             }
         }
-
-        self.mainWindow = window
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
     }
 
-    func openOnboardingWindow() {
-        guard let appState else { return }
-        closePopover(animated: false)
-        NSApp.setActivationPolicy(.regular)
+    // MARK: - Monitors
 
-        if let existing = onboardingWindow {
-            NSApp.activate(ignoringOtherApps: true)
-            existing.makeKeyAndOrderFront(nil)
-            return
-        }
-
-        let hosting = NSHostingController(
-            rootView: AnyView(
-                OnboardingView()
-                    .environment(appState)
-            )
-        )
-        hosting.sceneBridgingOptions = .all
-
-        let window = NSWindow(contentViewController: hosting)
-        window.title = tr("Welcome", "欢迎")
-        window.styleMask = [.titled, .closable, .fullSizeContentView]
-        window.titlebarAppearsTransparent = true
-        window.setContentSize(NSSize(width: 620, height: 520))
-        window.center()
-        window.isReleasedWhenClosed = false
-
-        if let obs = onboardingWindowCloseObserver {
-            NotificationCenter.default.removeObserver(obs)
-        }
-        onboardingWindowCloseObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.willCloseNotification,
-            object: window,
-            queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.onboardingWindow = nil
-                if self.mainWindow == nil {
-                    NSApp.setActivationPolicy(.accessory)
-                }
-            }
-        }
-
-        self.onboardingWindow = window
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
-    }
-
-    func closeOnboardingWindow() {
-        onboardingWindow?.close()
-        onboardingWindow = nil
-        if mainWindow == nil {
-            NSApp.setActivationPolicy(.accessory)
-        }
-    }
-
-    private func activateAppAndFocusPopoverWindow() {
-        NSApp.activate(ignoringOtherApps: true)
-        popoverWindow?.makeKeyAndOrderFront(nil)
-    }
-
-    private var popoverWindow: NSWindow? {
-        popover.contentViewController?.view.window
-    }
-
-    private func syncStatusButtonHighlight() {
-        statusItem?.button?.highlight(popover.isShown && popoverState.isPinned)
-    }
-
-    private func installPopoverLifecycleMonitorsIfNeeded() {
+    private func installMonitorsIfNeeded() {
         if localKeyMonitor == nil {
             localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                if event.keyCode == 53, let self, self.popover.isShown {
+                guard let self, self.isPanelVisible else { return event }
+                if event.keyCode == UInt16(kVK_Escape) {
                     self.handleEscapeKey()
                     return nil
                 }
                 return event
             }
         }
-
         if globalMouseDownMonitor == nil {
             globalMouseDownMonitor = NSEvent.addGlobalMonitorForEvents(
                 matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    guard let self, self.popover.isShown else { return }
-                    guard !self.popoverState.isPinned else { return }
-                    if !self.isCursorInsidePopoverWindow() && !self.isCursorInsideStatusButton() {
-                        self.closePopover()
-                    }
-                }
-            }
-        }
-
-        if appResignActiveObserver == nil {
-            appResignActiveObserver = NotificationCenter.default.addObserver(
-                forName: NSApplication.didResignActiveNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    guard let self, self.popover.isShown else { return }
-                    if !self.popoverState.isPinned {
-                        self.popoverState.isSearchFocused = false
-                        if !self.isCursorInActiveHoverZone() {
-                            self.closePopover()
-                        }
+                    guard let self, self.isPanelVisible, !self.popoverState.isPinned else { return }
+                    if !self.isCursorInActiveZone() {
+                        self.closePanel(animated: true)
                     }
                 }
             }
         }
     }
 
-    private func removePopoverLifecycleMonitors() {
+    private func removeMonitors() {
         if let localKeyMonitor {
             NSEvent.removeMonitor(localKeyMonitor)
             self.localKeyMonitor = nil
@@ -808,85 +595,58 @@ final class MenuBarStatusController: NSObject, NSPopoverDelegate {
             NSEvent.removeMonitor(globalMouseDownMonitor)
             self.globalMouseDownMonitor = nil
         }
-        if let appResignActiveObserver {
-            NotificationCenter.default.removeObserver(appResignActiveObserver)
-            self.appResignActiveObserver = nil
-        }
     }
 
-    // MARK: - NSPopoverDelegate
+    // MARK: - Window Management (Delegated)
 
-    func popoverDidShow(_ notification: Notification) {
-        popoverViewController?.forceActiveVisualEffectState()
+    func openMainWindow(tab: MainTab) {
+        closePanel(animated: false)
+        windows.openMainWindow(tab: tab)
     }
 
-    func popoverDidClose(_ notification: Notification) {
-        isAnimatingOpen = false
-        isClosingAnimated = false
-        pendingContentSize = nil
-        targetPopoverFrame = nil
-        stopHoverWatchLoop()
-        removePopoverLifecycleMonitors()
-        popoverState.isShown = false
-        popoverState.isPinned = false
-        popoverState.isSearchFocused = false
-        popoverState.desktopResumeHintVisible = false
-        isHoveringPopover = false
-        syncStatusButtonHighlight()
+    func openOnboardingWindow() {
+        closePanel(animated: false)
+        windows.openOnboardingWindow()
     }
 
-    // MARK: - Screen Geometry Helpers
+    func closeOnboardingWindow() {
+        windows.closeOnboardingWindow()
+    }
+
+    // MARK: - Geometry Helpers
+
+    private func syncStatusButtonHighlight() {
+        statusItem?.button?.highlight(isPanelVisible && popoverState.isPinned)
+    }
 
     private func statusButtonScreenRect() -> NSRect? {
-        guard let button = statusItem?.button,
-              let btnWindow = button.window
-        else { return nil }
-        let rectInWindow = button.convert(button.bounds, to: nil)
-        return btnWindow.convertToScreen(rectInWindow)
+        guard let button = statusItem?.button, let window = button.window else { return nil }
+        return window.convertToScreen(button.convert(button.bounds, to: nil))
     }
 
-    private func isCursorInsideStatusButton() -> Bool {
+    private func screenVisibleFrame(for anchor: NSRect) -> NSRect {
+        let screen = statusItem?.button?.window?.screen
+            ?? NSScreen.screens.first(where: { $0.frame.contains(NSPoint(x: anchor.midX, y: anchor.midY)) })
+            ?? NSScreen.main
+        return screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+    }
+
+    private func isCursorOverStatusButton() -> Bool {
         guard let rect = statusButtonScreenRect() else { return false }
         return rect.insetBy(dx: -4, dy: -4).contains(NSEvent.mouseLocation)
     }
 
-    private func isCursorInsidePopoverWindow() -> Bool {
-        guard popover.isShown, let window = popoverWindow else { return false }
-        let effectiveRect = targetPopoverFrame.map { $0.union(window.frame) } ?? window.frame
-        return effectiveRect.insetBy(dx: -4, dy: -6).contains(NSEvent.mouseLocation)
-    }
-
-    /// 判断鼠标当前是否位于「状态栏图标 + 图标至弹窗顶部箭头衔接带 + Popover 窗口」联合热区内。
-    private func isCursorInActiveHoverZone() -> Bool {
-        let cursor = NSEvent.mouseLocation
-
-        if let buttonRect = statusButtonScreenRect() {
-            if buttonRect.insetBy(dx: -4, dy: -4).contains(cursor) {
-                return true
-            }
-            if popover.isShown, let window = popoverWindow {
-                let popRect = targetPopoverFrame.map { $0.union(window.frame) } ?? window.frame
-                if popRect.insetBy(dx: -4, dy: -6).contains(cursor) {
-                    return true
-                }
-                // 衔接带：允许光标从顶部菜单栏图标平滑下移穿过箭头进入 Popover，不会在缝隙处误判为移出
-                if popRect.maxY <= buttonRect.maxY + 10 {
-                    let minX = min(buttonRect.minX - 10, popRect.midX - 28)
-                    let maxX = max(buttonRect.maxX + 10, popRect.midX + 28)
-                    let minY = popRect.maxY - 8
-                    let maxY = buttonRect.maxY + 2
-                    if maxY > minY {
-                        let bridgeRect = NSRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
-                        if bridgeRect.contains(cursor) {
-                            return true
-                        }
-                    }
-                }
-                return false
-            }
-        }
-
-        return isCursorInsidePopoverWindow()
+    private func isCursorInActiveZone() -> Bool {
+        let panelRect: NSRect? = {
+            guard let panel, panel.isVisible else { return nil }
+            if let targetFrame { return targetFrame.union(panel.frame) }
+            return panel.frame
+        }()
+        return HoverZoneGeometry.isInActiveZone(
+            cursor: NSEvent.mouseLocation,
+            anchor: statusButtonScreenRect(),
+            panel: panelRect
+        )
     }
 }
 
@@ -911,185 +671,10 @@ private final class StatusButtonTrackingResponder: NSResponder {
     }
 
     override func mouseEntered(with event: NSEvent) {
-        MainActor.assumeIsolated {
-            onMouseEntered()
-        }
+        onMouseEntered()
     }
 
     override func mouseExited(with event: NSEvent) {
-        MainActor.assumeIsolated {
-            onMouseExited()
-        }
-    }
-}
-
-// MARK: - PopoverContainerViewController & Non-Activating Hosting View
-//
-// 注意：此处严禁定义泛型 NSHostingView<T> 子类，必须固定为具体类型 NSHostingView<AnyView>，
-// 规避 Swift 6.2.4 Release(-O) 下 SILPerformanceInliner 的已知无限递归编译器崩溃（见 FloatingPanelController.swift）。
-
-private final class PopoverContainerViewController: NSViewController {
-    private let hostingView: NonActivatingPopoverHostingView
-    private let onHoverChanged: @MainActor (Bool) -> Void
-    private let onSizeChanged: @MainActor (NSSize) -> Void
-    private let onCancelOperation: @MainActor () -> Void
-
-    init(
-        rootView: AnyView,
-        shouldPreventActivation: @escaping @MainActor () -> Bool,
-        onHoverChanged: @escaping @MainActor (Bool) -> Void,
-        onSizeChanged: @escaping @MainActor (NSSize) -> Void,
-        onCancelOperation: @escaping @MainActor () -> Void
-    ) {
-        self.hostingView = NonActivatingPopoverHostingView(rootView: rootView)
-        self.onHoverChanged = onHoverChanged
-        self.onSizeChanged = onSizeChanged
-        self.onCancelOperation = onCancelOperation
-        super.init(nibName: nil, bundle: nil)
-
-        self.hostingView.shouldPreventActivation = shouldPreventActivation
-        self.hostingView.onLayoutFittingSize = { [weak self] size in
-            self?.onSizeChanged(size)
-        }
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func loadView() {
-        let trackingView = PopoverContentTrackingView(onHoverChanged: onHoverChanged)
-        hostingView.translatesAutoresizingMaskIntoConstraints = false
-        trackingView.addSubview(hostingView)
-        NSLayoutConstraint.activate([
-            hostingView.leadingAnchor.constraint(equalTo: trackingView.leadingAnchor),
-            hostingView.trailingAnchor.constraint(equalTo: trackingView.trailingAnchor),
-            hostingView.topAnchor.constraint(equalTo: trackingView.topAnchor),
-            hostingView.bottomAnchor.constraint(equalTo: trackingView.bottomAnchor),
-        ])
-        self.view = trackingView
-    }
-
-    override func viewDidAppear() {
-        super.viewDidAppear()
-        forceActiveVisualEffectState()
-    }
-
-    override func cancelOperation(_ sender: Any?) {
-        onCancelOperation()
-    }
-
-    /// 悬停模式下不调用 `NSApp.activate`，`NSPopover` 底层 `NSVisualEffectView` 默认跟随窗口激活态而退化为灰暗非激活材质。
-    /// 这里递归将其固定为 `.active`，保证不抢终端焦点的同时依然保持清晰通透的原生材质对比度。
-    func forceActiveVisualEffectState() {
-        guard let root = view.window?.contentView?.superview ?? view.window?.contentView else { return }
-        Self.activateVisualEffectViews(in: root)
-    }
-
-    private static func activateVisualEffectViews(in view: NSView) {
-        if let effectView = view as? NSVisualEffectView, effectView.state != .active {
-            effectView.state = .active
-        }
-        for subview in view.subviews {
-            activateVisualEffectViews(in: subview)
-        }
-    }
-
-    func measureFittingSize() -> NSSize? {
-        _ = view
-        if view.frame.width != 340 {
-            view.frame.size.width = 340
-        }
-        hostingView.layoutSubtreeIfNeeded()
-        let fit = hostingView.fittingSize
-        guard fit.width > 10, fit.height > 10 else { return nil }
-        preferredContentSize = fit
-        return fit
-    }
-}
-
-private final class PopoverContentTrackingView: NSView {
-    private let onHoverChanged: @MainActor (Bool) -> Void
-    private var trackingAreaRef: NSTrackingArea?
-
-    init(onHoverChanged: @escaping @MainActor (Bool) -> Void) {
-        self.onHoverChanged = onHoverChanged
-        super.init(frame: NSRect(x: 0, y: 0, width: 340, height: 240))
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override var allowsVibrancy: Bool { false }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        guard trackingAreaRef == nil else { return }
-        let area = NSTrackingArea(
-            rect: .zero,
-            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(area)
-        trackingAreaRef = area
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        MainActor.assumeIsolated {
-            onHoverChanged(true)
-        }
-    }
-
-    override func mouseMoved(with event: NSEvent) {
-        MainActor.assumeIsolated {
-            onHoverChanged(true)
-        }
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        MainActor.assumeIsolated {
-            onHoverChanged(false)
-        }
-    }
-}
-
-private final class NonActivatingPopoverHostingView: NSHostingView<AnyView> {
-    var shouldPreventActivation: (@MainActor () -> Bool)?
-    var onLayoutFittingSize: (@MainActor (NSSize) -> Void)?
-    private var lastReportedSize: NSSize = .zero
-
-    override var allowsVibrancy: Bool { false }
-
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
-        true
-    }
-
-    override func shouldDelayWindowOrdering(for event: NSEvent) -> Bool {
-        MainActor.assumeIsolated {
-            shouldPreventActivation?() ?? false
-        }
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        MainActor.assumeIsolated {
-            if shouldPreventActivation?() == true {
-                NSApp.preventWindowOrdering()
-            }
-        }
-        super.mouseDown(with: event)
-    }
-
-    override func layout() {
-        super.layout()
-        let fit = fittingSize
-        guard fit.width > 10, fit.height > 10, fit != lastReportedSize else { return }
-        lastReportedSize = fit
-        MainActor.assumeIsolated {
-            onLayoutFittingSize?(fit)
-        }
+        onMouseExited()
     }
 }

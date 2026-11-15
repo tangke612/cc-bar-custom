@@ -82,8 +82,7 @@ struct CopyResumeCommandButton: View {
     }
 
     private func performCopy() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(resumeCommand.command, forType: .string)
+        SessionActions.copyResumeCommand(resumeCommand)
 
         copied = true
         resetTask?.cancel()
@@ -192,8 +191,11 @@ final class ResumeButtonClickNSView: NSView {
 struct PopoverSearchField: View {
     let placeholder: String
     @Binding var text: String
+    var focusToken: Int = 0
     let onActivateFocus: () -> Void
     let onEscape: () -> Void
+    var onMove: ((Int) -> Void)? = nil
+    var onSubmit: (() -> Void)? = nil
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -206,8 +208,11 @@ struct PopoverSearchField: View {
             ActivatingTextFieldRepresentable(
                 placeholder: placeholder,
                 text: $text,
+                focusToken: focusToken,
                 onActivateFocus: onActivateFocus,
-                onEscape: onEscape
+                onEscape: onEscape,
+                onMove: onMove,
+                onSubmit: onSubmit
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -239,8 +244,11 @@ struct PopoverSearchField: View {
 private struct ActivatingTextFieldRepresentable: NSViewRepresentable {
     let placeholder: String
     @Binding var text: String
+    let focusToken: Int
     let onActivateFocus: () -> Void
     let onEscape: () -> Void
+    let onMove: ((Int) -> Void)?
+    let onSubmit: (() -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(text: $text, onEscape: onEscape)
@@ -259,13 +267,25 @@ private struct ActivatingTextFieldRepresentable: NSViewRepresentable {
         field.applyReadablePlaceholder(placeholder)
         field.delegate = context.coordinator
         field.onActivateFocus = onActivateFocus
+        context.coordinator.lastFocusToken = focusToken
         return field
     }
 
     func updateNSView(_ nsView: ActivatingSearchNSTextField, context: Context) {
         context.coordinator.text = $text
         context.coordinator.onEscape = onEscape
+        context.coordinator.onMove = onMove
+        context.coordinator.onSubmit = onSubmit
         nsView.onActivateFocus = onActivateFocus
+        if context.coordinator.lastFocusToken != focusToken {
+            context.coordinator.lastFocusToken = focusToken
+            if focusToken > 0 {
+                // 全局快捷键唤出：面板已 makeKey，这里把输入焦点交给搜索框。
+                DispatchQueue.main.async {
+                    nsView.window?.makeFirstResponder(nsView)
+                }
+            }
+        }
         if nsView.currentPlaceholder != placeholder {
             nsView.applyReadablePlaceholder(placeholder)
         }
@@ -278,6 +298,9 @@ private struct ActivatingTextFieldRepresentable: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextFieldDelegate {
         var text: Binding<String>
         var onEscape: () -> Void
+        var onMove: ((Int) -> Void)?
+        var onSubmit: (() -> Void)?
+        var lastFocusToken = 0
 
         init(text: Binding<String>, onEscape: @escaping () -> Void) {
             self.text = text
@@ -302,6 +325,18 @@ private struct ActivatingTextFieldRepresentable: NSViewRepresentable {
         ) -> Bool {
             if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
                 onEscape()
+                return true
+            }
+            if commandSelector == #selector(NSResponder.moveDown(_:)), let onMove {
+                onMove(1)
+                return true
+            }
+            if commandSelector == #selector(NSResponder.moveUp(_:)), let onMove {
+                onMove(-1)
+                return true
+            }
+            if commandSelector == #selector(NSResponder.insertNewline(_:)), let onSubmit {
+                onSubmit()
                 return true
             }
             return false
@@ -335,5 +370,211 @@ final class ActivatingSearchNSTextField: NSTextField {
         onActivateFocus?()
         window?.makeKeyAndOrderFront(nil)
         super.mouseDown(with: event)
+    }
+}
+
+
+// MARK: - Search Highlight
+
+/// 标题中命中搜索词的片段加粗并以强调色底纹标出（忽略大小写）。
+struct HighlightedText: View {
+    let text: String
+    let query: String
+
+    var body: some View {
+        Text(attributed)
+    }
+
+    private var attributed: AttributedString {
+        var result = AttributedString(text)
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return result }
+        var searchStart = text.startIndex
+        while searchStart < text.endIndex,
+              let range = text.range(of: needle, options: [.caseInsensitive, .diacriticInsensitive], range: searchStart..<text.endIndex) {
+            if let attrRange = Range(range, in: result) {
+                result[attrRange].backgroundColor = Color.accentColor.opacity(0.22)
+                result[attrRange].inlinePresentationIntent = .stronglyEmphasized
+            }
+            searchStart = range.upperBound
+        }
+        return result
+    }
+}
+
+// MARK: - Session Actions (Copy / Terminal / Finder / Editor)
+
+@MainActor
+enum SessionActions {
+    static func copyResumeCommand(_ command: SessionResumeCommand) {
+        copy(command.command)
+    }
+
+    static func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    static func revealInFinder(_ path: String) {
+        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
+    }
+
+    nonisolated struct Editor: Identifiable, Sendable {
+        let name: String
+        let bundleID: String
+        var id: String { bundleID }
+    }
+
+    static let knownEditors: [Editor] = [
+        Editor(name: "VS Code", bundleID: "com.microsoft.VSCode"),
+        Editor(name: "Cursor", bundleID: "com.todesktop.230313mzl4w4u92"),
+        Editor(name: "Zed", bundleID: "dev.zed.Zed"),
+        Editor(name: "Windsurf", bundleID: "com.exafunction.windsurf"),
+        Editor(name: "Xcode", bundleID: "com.apple.dt.Xcode"),
+    ]
+
+    static var installedEditors: [Editor] {
+        knownEditors.filter { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0.bundleID) != nil }
+    }
+
+    static func open(_ path: String, with editor: Editor) {
+        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: editor.bundleID) else { return }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.open([URL(fileURLWithPath: path, isDirectory: true)], withApplicationAt: appURL, configuration: configuration)
+    }
+
+    static func isInstalled(_ terminal: ResumeTerminalApp) -> Bool {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: terminal.bundleIdentifier) != nil
+    }
+
+    /// 在选定终端中新开窗口 / 标签执行恢复命令（会切换到该终端，属于用户主动操作）。
+    static func runInTerminal(_ command: SessionResumeCommand, app requestedApp: ResumeTerminalApp? = nil) {
+        let app = requestedApp ?? SettingsStore.shared.resumeTerminalApp
+        let shellCommand = command.command
+        switch app {
+        case .terminal:
+            runAppleScript("""
+            tell application "Terminal"
+                activate
+                do script "\(appleScriptEscaped(shellCommand))"
+            end tell
+            """)
+        case .iTerm:
+            runAppleScript("""
+            tell application "iTerm"
+                activate
+                set newWindow to (create window with default profile)
+                tell current session of newWindow
+                    write text "\(appleScriptEscaped(shellCommand))"
+                end tell
+            end tell
+            """)
+        case .ghostty:
+            let shell = ProcessInfo.processInfo.environment["SHELL"].flatMap { $0.isEmpty ? nil : $0 } ?? "/bin/zsh"
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            process.arguments = ["-na", "Ghostty", "--args", "-e", shell, "-lic", "\(shellCommand); exec \(shell) -l"]
+            do {
+                try process.run()
+            } catch {
+                AppLog.error(.app, "[resume] launch Ghostty failed: \(error.localizedDescription)")
+                copy(shellCommand)
+            }
+        }
+    }
+
+    private static func appleScriptEscaped(_ text: String) -> String {
+        text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    private static func runAppleScript(_ source: String) {
+        var error: NSDictionary?
+        NSAppleScript(source: source)?.executeAndReturnError(&error)
+        if let error {
+            AppLog.error(.app, "[resume] AppleScript failed: \(error)")
+            NSSound.beep()
+        }
+    }
+}
+
+// MARK: - Session Context Menu
+
+/// 会话行右键菜单（弹窗快捷区与主窗口会话列表共用）。
+struct SessionContextMenuItems: View {
+    let record: SessionHistoryRecord
+    var onDidPerform: () -> Void = {}
+
+    var body: some View {
+        let command = record.resumeCommand
+        let terminal = SettingsStore.shared.resumeTerminalApp
+
+        Button(tr("Copy Resume Command", "复制恢复命令")) {
+            SessionActions.copyResumeCommand(command)
+        }
+        if SessionActions.isInstalled(terminal) {
+            Button(tr("Resume in \(terminal.displayName)", "在 \(terminal.displayName) 中恢复")) {
+                onDidPerform()
+                SessionActions.runInTerminal(command, app: terminal)
+            }
+        }
+        if let note = command.permissionNote {
+            Text(note)
+        }
+
+        Divider()
+
+        Button(tr("Copy Session ID", "复制会话 ID")) {
+            SessionActions.copy(record.sessionID)
+        }
+        if let cwd = record.cwd, !cwd.isEmpty {
+            Button(tr("Copy Working Directory", "复制工作目录")) {
+                SessionActions.copy(cwd)
+            }
+            if record.cwdExists {
+                Button(tr("Show in Finder", "在 Finder 中显示")) {
+                    onDidPerform()
+                    SessionActions.revealInFinder(cwd)
+                }
+                let editors = SessionActions.installedEditors
+                if !editors.isEmpty {
+                    Divider()
+                    ForEach(editors) { editor in
+                        Button(tr("Open Project in \(editor.name)", "用 \(editor.name) 打开项目")) {
+                            onDidPerform()
+                            SessionActions.open(cwd, with: editor)
+                        }
+                    }
+                }
+            } else {
+                Text(tr("Directory no longer exists", "工作目录已不存在"))
+            }
+        }
+    }
+}
+
+// MARK: - Privacy Helper
+
+extension SessionHistoryRecord {
+    /// 隐私模式下用于生成匿名标题的占位 `ConversationInfo`。
+    @MainActor
+    var privacyConversationInfo: ConversationInfo {
+        ConversationInfo(
+            key: key,
+            conversationID: sessionID,
+            app: origin.usageApp,
+            title: primaryTitle,
+            projectKey: cwd ?? "",
+            projectName: projectName,
+            projectPath: cwd ?? "",
+            projectStatus: cwd == nil ? .unassigned : .available,
+            projectSource: .cwd,
+            gitBranch: nil,
+            sourcePaths: [],
+            firstAt: lastActiveAt,
+            lastAt: lastActiveAt,
+            includesSubtasks: false,
+            cacheCreationAvailable: false
+        )
     }
 }

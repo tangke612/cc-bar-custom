@@ -312,6 +312,40 @@ final class SettingsStore {
         didSet { defaults.set(showRecentConversations, forKey: Keys.showRecentConversations) }
     }
 
+    // MARK: 定制：悬停面板与会话恢复
+
+    static let popoverHoverOpenDelayChoices = [0, 100, 150, 250, 400, 600]
+    static let popoverAutoCloseDelayChoices = [150, 250, 400, 600, 1000]
+
+    /// 鼠标悬停菜单栏图标时自动弹出面板（关闭后只能点击图标打开）。
+    var popoverHoverOpenEnabled: Bool {
+        didSet { defaults.set(popoverHoverOpenEnabled, forKey: Keys.popoverHoverOpenEnabled) }
+    }
+    /// 悬停多少毫秒后弹出面板，默认 150。
+    var popoverHoverOpenDelayMs: Int {
+        didSet { defaults.set(popoverHoverOpenDelayMs, forKey: Keys.popoverHoverOpenDelayMs) }
+    }
+    /// 鼠标离开图标与面板多少毫秒后自动收起，默认 250。
+    var popoverAutoCloseDelayMs: Int {
+        didSet { defaults.set(popoverAutoCloseDelayMs, forKey: Keys.popoverAutoCloseDelayMs) }
+    }
+    /// 点击菜单栏图标打开时直接固定面板（旧行为）；默认关闭，点击打开也会在鼠标离开后自动收起。
+    var popoverClickPins: Bool {
+        didSet { defaults.set(popoverClickPins, forKey: Keys.popoverClickPins) }
+    }
+    /// 全局快捷键 ⌃⌥K：打开面板并聚焦会话搜索。
+    var quickPanelHotKeyEnabled: Bool {
+        didSet { defaults.set(quickPanelHotKeyEnabled, forKey: Keys.quickPanelHotKeyEnabled) }
+    }
+    /// 恢复命令附加的权限参数策略。
+    var resumePermissionMode: ResumePermissionMode {
+        didSet { defaults.set(resumePermissionMode.rawValue, forKey: Keys.resumePermissionMode) }
+    }
+    /// 「在终端中恢复」使用的终端。
+    var resumeTerminalApp: ResumeTerminalApp {
+        didSet { defaults.set(resumeTerminalApp.rawValue, forKey: Keys.resumeTerminalApp) }
+    }
+
     static let recentConversationLimitRange = 3...10
 
     /// Popover「最近对话」最多显示几条，3～10，默认 5
@@ -464,6 +498,15 @@ final class SettingsStore {
             max(storedRecentLimit, Self.recentConversationLimitRange.lowerBound),
             Self.recentConversationLimitRange.upperBound
         )
+        popoverHoverOpenEnabled = defaults.object(forKey: Keys.popoverHoverOpenEnabled) as? Bool ?? true
+        popoverHoverOpenDelayMs = defaults.object(forKey: Keys.popoverHoverOpenDelayMs) as? Int ?? 150
+        popoverAutoCloseDelayMs = defaults.object(forKey: Keys.popoverAutoCloseDelayMs) as? Int ?? 250
+        popoverClickPins = defaults.object(forKey: Keys.popoverClickPins) as? Bool ?? false
+        quickPanelHotKeyEnabled = defaults.object(forKey: Keys.quickPanelHotKeyEnabled) as? Bool ?? true
+        resumePermissionMode = defaults.string(forKey: Keys.resumePermissionMode)
+            .flatMap(ResumePermissionMode.init(rawValue:)) ?? .inherit
+        resumeTerminalApp = defaults.string(forKey: Keys.resumeTerminalApp)
+            .flatMap(ResumeTerminalApp.init(rawValue:)) ?? .terminal
         proxyMode = defaults.string(forKey: NetworkProxy.Keys.mode).flatMap(ProxyMode.init(rawValue:)) ?? .system
         proxyType = defaults.string(forKey: NetworkProxy.Keys.type).flatMap(ProxyType.init(rawValue:)) ?? .http
         proxyHost = defaults.string(forKey: NetworkProxy.Keys.host) ?? ""
@@ -877,6 +920,13 @@ final class SettingsStore {
         static let showServiceStatus = "ccbar.settings.showServiceStatus"
         static let showRecentConversations = "ccbar.settings.showRecentConversations"
         static let recentConversationLimit = "ccbar.settings.recentConversationLimit"
+        static let popoverHoverOpenEnabled = "ccbar.custom.popoverHoverOpenEnabled"
+        static let popoverHoverOpenDelayMs = "ccbar.custom.popoverHoverOpenDelayMs"
+        static let popoverAutoCloseDelayMs = "ccbar.custom.popoverAutoCloseDelayMs"
+        static let popoverClickPins = "ccbar.custom.popoverClickPins"
+        static let quickPanelHotKeyEnabled = "ccbar.custom.quickPanelHotKeyEnabled"
+        static let resumePermissionMode = "ccbar.custom.resumePermissionMode"
+        static let resumeTerminalApp = "ccbar.custom.resumeTerminalApp"
         static let launchAtLogin = "ccbar.settings.launchAtLogin"
         static let appLanguage = "ccbar.settings.appLanguage"
         static let privacyMode = "ccbar.settings.privacyMode"

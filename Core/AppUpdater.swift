@@ -76,6 +76,15 @@ final class AppUpdater: NSObject, SPUUserDriver, SPUUpdaterDelegate, NSWindowDel
     func start() {
         guard !didStart, !AppRuntime.isRunningUnitTests else { return }
         didStart = true
+        // 定制版：完全不启动 Sparkle，避免原项目发布的新版本（同一公钥签名）覆盖本地定制功能。
+        if Bundle.main.object(forInfoDictionaryKey: "CCBarCustomBuild") as? Bool == true {
+            automaticChecks = false
+            configurationError = tr(
+                "In-app updates are disabled in this custom build so upstream releases can't overwrite it. Rebuild from your custom branch instead.",
+                "定制版已关闭应用内更新，防止原项目新版本覆盖定制功能。如需更新，请在 custom 分支合并上游后重新构建。"
+            )
+            return
+        }
         confirmInstalledUpdate()
         // 只迁移旧偏好一次；后续检查设置直接由 Sparkle 的 UserDefaults 管理。
         if defaults.object(forKey: "SUEnableAutomaticChecks") == nil {

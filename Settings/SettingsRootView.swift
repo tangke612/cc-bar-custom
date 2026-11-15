@@ -372,6 +372,129 @@ struct SettingsRootView: View {
         }
 
         PrefsGroup(
+            title: "Hover Panel & Resume",
+            chinese: "悬停面板与会话恢复"
+        ) {
+            PrefsRow(
+                label: "Open on hover",
+                chinese: "悬停自动弹出",
+                desc: "Hover the menu bar icon to open the panel without stealing focus.",
+                chineseDesc: "鼠标停在菜单栏图标上即弹出面板，不抢终端焦点"
+            ) {
+                HStack(spacing: 8) {
+                    if settings.popoverHoverOpenEnabled {
+                        Picker("", selection: Binding(
+                            get: { settings.popoverHoverOpenDelayMs },
+                            set: { settings.popoverHoverOpenDelayMs = $0 }
+                        )) {
+                            ForEach(SettingsStore.popoverHoverOpenDelayChoices, id: \.self) { ms in
+                                Text(ms == 0 ? tr("Instant", "立即") : "\(ms) ms").tag(ms)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .fixedSize()
+                        .help(tr("Hover delay", "悬停延迟"))
+                    }
+                    Toggle("", isOn: Binding(
+                        get: { settings.popoverHoverOpenEnabled },
+                        set: { settings.popoverHoverOpenEnabled = $0 }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .tint(.green)
+                }
+            }
+            InsetDivider()
+            PrefsRow(
+                label: "Auto-close after leaving",
+                chinese: "移开后自动收起",
+                desc: "Close when the pointer leaves the icon and panel. Pinned panels stay open.",
+                chineseDesc: "鼠标离开图标和面板后自动收起；点图钉固定的面板不收起"
+            ) {
+                Picker("", selection: Binding(
+                    get: { settings.popoverAutoCloseDelayMs },
+                    set: { settings.popoverAutoCloseDelayMs = $0 }
+                )) {
+                    ForEach(SettingsStore.popoverAutoCloseDelayChoices, id: \.self) { ms in
+                        Text("\(ms) ms").tag(ms)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .fixedSize()
+            }
+            InsetDivider()
+            PrefsRow(
+                label: "Clicking the icon pins the panel",
+                chinese: "点击图标即固定面板",
+                desc: "Off: clicking opens a panel that still auto-closes.",
+                chineseDesc: "关闭时，点击打开的面板同样会在移开后自动收起"
+            ) {
+                Toggle("", isOn: Binding(
+                    get: { settings.popoverClickPins },
+                    set: { settings.popoverClickPins = $0 }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .tint(.green)
+            }
+            InsetDivider()
+            PrefsRow(
+                label: "Global shortcut ⌃⌥K",
+                chinese: "全局快捷键 ⌃⌥K",
+                desc: "Open the panel and focus session search from anywhere.",
+                chineseDesc: "在任意位置打开面板并聚焦会话搜索"
+            ) {
+                Toggle("", isOn: Binding(
+                    get: { settings.quickPanelHotKeyEnabled },
+                    set: { settings.quickPanelHotKeyEnabled = $0 }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .tint(.green)
+            }
+            InsetDivider()
+            PrefsRow(
+                label: "Resume permissions",
+                chinese: "恢复命令权限",
+                desc: "Inherit: reuse the original session's approval / sandbox / YOLO flags.",
+                chineseDesc: "继承：沿用原会话的审批、沙箱与 YOLO（跳过权限确认）参数"
+            ) {
+                Picker("", selection: Binding(
+                    get: { settings.resumePermissionMode },
+                    set: { settings.resumePermissionMode = $0 }
+                )) {
+                    Text(tr("Inherit original", "继承原会话")).tag(ResumePermissionMode.inherit)
+                    Text(tr("Always full access (YOLO)", "始终完全放行（YOLO）")).tag(ResumePermissionMode.fullAccess)
+                    Text(tr("CLI defaults", "不附加（按 CLI 默认）")).tag(ResumePermissionMode.standard)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .fixedSize()
+            }
+            InsetDivider()
+            PrefsRow(
+                label: "Terminal for “Resume in…”",
+                chinese: "「在终端中恢复」使用",
+                desc: "Used by the right-click menu on session rows.",
+                chineseDesc: "会话行右键菜单中的「在终端中恢复」"
+            ) {
+                Picker("", selection: Binding(
+                    get: { settings.resumeTerminalApp },
+                    set: { settings.resumeTerminalApp = $0 }
+                )) {
+                    ForEach(ResumeTerminalApp.allCases) { app in
+                        Text(app.displayName).tag(app)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .fixedSize()
+            }
+        }
+
+        PrefsGroup(
             title: "Floating HUD",
             chinese: "桌面悬浮窗"
         ) {

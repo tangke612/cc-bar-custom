@@ -162,9 +162,16 @@
 		49C2AD04000000000001AABB /* SystemNotificationClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C2AD04000000000001AAAA /* SystemNotificationClient.swift */; };
 		49C2AD05000000000001AABB /* QuotaAlertStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C2AD05000000000001AAAA /* QuotaAlertStore.swift */; };
 		49C2AD06000000000001AABB /* QuotaAlertTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C2AD06000000000001AAAA /* QuotaAlertTests.swift */; };
+		5D057B726777EB2C667A2535 /* HoverZoneGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C057B726777EB2C667A2535 /* HoverZoneGeometry.swift */; };
+		5DE9CBCBF0B21C9C492BF593 /* GlobalHotKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CE9CBCBF0B21C9C492BF593 /* GlobalHotKey.swift */; };
+		5D01FC96F5AAA73CEE0C028D /* QuotaHoverPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C01FC96F5AAA73CEE0C028D /* QuotaHoverPanel.swift */; };
+		5DDEB819798DFD17221554AE /* AppWindowManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CDEB819798DFD17221554AE /* AppWindowManager.swift */; };
 		49C2B201000000000001AABB /* MenuBarStatusController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C2B201000000000001AAAA /* MenuBarStatusController.swift */; };
 		49C2B202000000000001AABB /* SessionResumeControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C2B202000000000001AAAA /* SessionResumeControls.swift */; };
 		49C2B203000000000001AABB /* SessionResumeModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C2B203000000000001AAAA /* SessionResumeModels.swift */; };
+		5DE3FF343F7A87721EE7FAED /* SessionHistoryScanner+ClaudeAgy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CE3FF343F7A87721EE7FAED /* SessionHistoryScanner+ClaudeAgy.swift */; };
+		5D8740CC45D18391F6F7489C /* SessionHistoryScanner+Antigravity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C8740CC45D18391F6F7489C /* SessionHistoryScanner+Antigravity.swift */; };
+		5D1F520CBD88FCB7FDC4354A /* SessionHistoryScanner+Paths.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C1F520CBD88FCB7FDC4354A /* SessionHistoryScanner+Paths.swift */; };
 		49C2B204000000000001AABB /* SessionHistoryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C2B204000000000001AAAA /* SessionHistoryService.swift */; };
 		49C2B205000000000001AABB /* SessionResumeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C2B205000000000001AAAA /* SessionResumeTests.swift */; };
 /* End PBXBuildFile section */
@@ -336,9 +343,16 @@
 		49C2AD04000000000001AAAA /* SystemNotificationClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemNotificationClient.swift; sourceTree = "<group>"; };
 		49C2AD05000000000001AAAA /* QuotaAlertStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuotaAlertStore.swift; sourceTree = "<group>"; };
 		49C2AD06000000000001AAAA /* QuotaAlertTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuotaAlertTests.swift; sourceTree = "<group>"; };
+		5C057B726777EB2C667A2535 /* HoverZoneGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HoverZoneGeometry.swift; sourceTree = "<group>"; };
+		5CE9CBCBF0B21C9C492BF593 /* GlobalHotKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalHotKey.swift; sourceTree = "<group>"; };
+		5C01FC96F5AAA73CEE0C028D /* QuotaHoverPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuotaHoverPanel.swift; sourceTree = "<group>"; };
+		5CDEB819798DFD17221554AE /* AppWindowManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppWindowManager.swift; sourceTree = "<group>"; };
 		49C2B201000000000001AAAA /* MenuBarStatusController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarStatusController.swift; sourceTree = "<group>"; };
 		49C2B202000000000001AAAA /* SessionResumeControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionResumeControls.swift; sourceTree = "<group>"; };
 		49C2B203000000000001AAAA /* SessionResumeModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionResumeModels.swift; sourceTree = "<group>"; };
+		5CE3FF343F7A87721EE7FAED /* SessionHistoryScanner+ClaudeAgy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SessionHistoryScanner+ClaudeAgy.swift"; sourceTree = "<group>"; };
+		5C8740CC45D18391F6F7489C /* SessionHistoryScanner+Antigravity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SessionHistoryScanner+Antigravity.swift"; sourceTree = "<group>"; };
+		5C1F520CBD88FCB7FDC4354A /* SessionHistoryScanner+Paths.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SessionHistoryScanner+Paths.swift"; sourceTree = "<group>"; };
 		49C2B204000000000001AAAA /* SessionHistoryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionHistoryService.swift; sourceTree = "<group>"; };
 		49C2B205000000000001AAAA /* SessionResumeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionResumeTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -419,6 +433,10 @@
 			children = (
 				4931AC4F2FC02A4200EE598C /* MenuBarLabel.swift */,
 				49C2B201000000000001AAAA /* MenuBarStatusController.swift */,
+				5CDEB819798DFD17221554AE /* AppWindowManager.swift */,
+				5C01FC96F5AAA73CEE0C028D /* QuotaHoverPanel.swift */,
+				5CE9CBCBF0B21C9C492BF593 /* GlobalHotKey.swift */,
+				5C057B726777EB2C667A2535 /* HoverZoneGeometry.swift */,
 				4931AC502FC02A4200EE598C /* PopoverRootView.swift */,
 				49C2B202000000000001AAAA /* SessionResumeControls.swift */,
 				49C1B193000000000001AAAA /* OtherCodexAccountsSection.swift */,
@@ -580,6 +598,9 @@
 				49C1B167000000000001AAAA /* ConversationTitleIndex.swift */,
 				49C2B203000000000001AAAA /* SessionResumeModels.swift */,
 				49C2B204000000000001AAAA /* SessionHistoryService.swift */,
+				5C1F520CBD88FCB7FDC4354A /* SessionHistoryScanner+Paths.swift */,
+				5C8740CC45D18391F6F7489C /* SessionHistoryScanner+Antigravity.swift */,
+				5CE3FF343F7A87721EE7FAED /* SessionHistoryScanner+ClaudeAgy.swift */,
 			);
 			path = Usage;
 			sourceTree = "<group>";
@@ -817,6 +838,10 @@
 				49C2AD05000000000001AABB /* QuotaAlertStore.swift in Sources */,
 				4931AC622FC02A4200EE598C /* MenuBarLabel.swift in Sources */,
 				49C2B201000000000001AABB /* MenuBarStatusController.swift in Sources */,
+				5DDEB819798DFD17221554AE /* AppWindowManager.swift in Sources */,
+				5D01FC96F5AAA73CEE0C028D /* QuotaHoverPanel.swift in Sources */,
+				5DE9CBCBF0B21C9C492BF593 /* GlobalHotKey.swift in Sources */,
+				5D057B726777EB2C667A2535 /* HoverZoneGeometry.swift in Sources */,
 				4931AC632FC02A4200EE598C /* CCBarApp.swift in Sources */,
 				4931AC642FC02A4200EE598C /* SettingsRootView.swift in Sources */,
 				49C1CC04000000000001AABB /* CommandCodeCredentialSheet.swift in Sources */,
@@ -908,6 +933,9 @@
 				49C1B167000000000001AABB /* ConversationTitleIndex.swift in Sources */,
 				49C2B203000000000001AABB /* SessionResumeModels.swift in Sources */,
 				49C2B204000000000001AABB /* SessionHistoryService.swift in Sources */,
+				5D1F520CBD88FCB7FDC4354A /* SessionHistoryScanner+Paths.swift in Sources */,
+				5D8740CC45D18391F6F7489C /* SessionHistoryScanner+Antigravity.swift in Sources */,
+				5DE3FF343F7A87721EE7FAED /* SessionHistoryScanner+ClaudeAgy.swift in Sources */,
 				49C1B168000000000001AABB /* ConversationRollupCache.swift in Sources */,
 				49C1B171000000000001AABB /* FloatingPanel.swift in Sources */,
 				49C1B172000000000001AABB /* FloatingContentView.swift in Sources */,

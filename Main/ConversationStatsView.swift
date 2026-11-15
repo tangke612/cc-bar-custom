@@ -515,7 +515,7 @@ private struct ConversationListRow: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 ServiceTile(app: summary.info.app, size: 14)
-                Text(displayTitle)
+                HighlightedText(text: displayTitle, query: PrivacyDisplay.isEnabled ? "" : lowercasedSearch)
                     .font(.system(size: 12.5, weight: .medium))
                     .lineLimit(1)
                 if let badge = sessionRecord?.origin.sourceBadge {
@@ -576,6 +576,15 @@ private struct ConversationListRow: View {
             .font(.system(size: 10.5))
             .monospacedDigit()
             .foregroundStyle(.secondary)
+        }
+        .contextMenu {
+            if let sessionRecord {
+                SessionContextMenuItems(record: sessionRecord)
+            } else if let resumeCommand {
+                Button(tr("Copy Resume Command", "复制恢复命令")) {
+                    SessionActions.copyResumeCommand(resumeCommand)
+                }
+            }
         }
     }
 

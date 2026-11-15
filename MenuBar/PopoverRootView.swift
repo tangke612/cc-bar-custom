@@ -857,6 +857,9 @@ private struct RecentSessionsQuickSection: View {
     @Environment(MenuBarPopoverState.self) private var popoverState
     let onOpenSession: (String, UsageApp) -> Void
 
+    @State private var keyboardCopiedKey: String?
+    @State private var keyboardCopyResetTask: Task<Void, Never>?
+
     var body: some View {
         @Bindable var bindablePopover = popoverState
         TimelineView(.periodic(from: .now, by: 30)) { context in
@@ -872,13 +875,20 @@ private struct RecentSessionsQuickSection: View {
                     sectionHeader
 
                     PopoverSearchField(
-                        placeholder: tr("Search project, summary or prompt…", "搜索项目、摘要或提问…"),
+                        placeholder: tr("Search project, prompt, branch or pinyin…", "搜索项目、提问、分支或拼音…"),
                         text: $bindablePopover.searchText,
+                        focusToken: popoverState.focusSearchToken,
                         onActivateFocus: {
                             MenuBarStatusController.shared.activateForSearch()
                         },
                         onEscape: {
                             MenuBarStatusController.shared.handleEscapeKey()
+                        },
+                        onMove: { delta in
+                            moveSelection(delta, count: rows.count)
+                        },
+                        onSubmit: {
+                            copySelection(rows: rows)
                         }
                     )
                     .padding(.horizontal, 12)
@@ -886,23 +896,55 @@ private struct RecentSessionsQuickSection: View {
                     if rows.isEmpty {
                         Text(isSearching
                              ? tr("No matching sessions", "未找到匹配的会话")
-                             : tr("No recent Codex or Antigravity sessions", "暂无最近会话"))
+                             : tr("No recent sessions", "暂无最近会话"))
                             .font(.system(size: 11))
                             .foregroundStyle(PopoverPalette.mutedText)
                             .frame(maxWidth: .infinity, alignment: .center)
                             .padding(.vertical, 10)
                     } else if rows.count > 5 {
-                        ScrollView {
-                            rowsStack(rows: rows, lowerQuery: trimmedQuery.lowercased(), now: context.date)
+                        ScrollViewReader { proxy in
+                            ScrollView {
+                                rowsStack(rows: rows, lowerQuery: trimmedQuery.lowercased(), now: context.date)
+                            }
+                            .frame(maxHeight: 220)
+                            .padding(.bottom, 6)
+                            .onChange(of: popoverState.keyboardSelection) { _, index in
+                                guard let index, rows.indices.contains(index) else { return }
+                                withAnimation(.easeOut(duration: 0.12)) {
+                                    proxy.scrollTo(rows[index].key, anchor: .center)
+                                }
+                            }
                         }
-                        .frame(maxHeight: 220)
-                        .padding(.bottom, 6)
                     } else {
                         rowsStack(rows: rows, lowerQuery: trimmedQuery.lowercased(), now: context.date)
                             .padding(.bottom, 6)
                     }
                 }
+                .onChange(of: popoverState.searchText) { _, _ in
+                    popoverState.keyboardSelection = nil
+                }
             }
+        }
+    }
+
+    private func moveSelection(_ delta: Int, count: Int) {
+        guard count > 0 else { return }
+        let current = popoverState.keyboardSelection ?? (delta > 0 ? -1 : count)
+        popoverState.keyboardSelection = min(max(current + delta, 0), count - 1)
+    }
+
+    private func copySelection(rows: [SessionHistoryRecord]) {
+        let index = popoverState.keyboardSelection ?? 0
+        guard rows.indices.contains(index) else { return }
+        let record = rows[index]
+        popoverState.keyboardSelection = index
+        SessionActions.copyResumeCommand(record.resumeCommand)
+        keyboardCopiedKey = record.key
+        keyboardCopyResetTask?.cancel()
+        keyboardCopyResetTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled else { return }
+            keyboardCopiedKey = nil
         }
     }
 
@@ -912,12 +954,13 @@ private struct RecentSessionsQuickSection: View {
         now: Date
     ) -> some View {
         VStack(spacing: 1) {
-            ForEach(rows) { record in
+            ForEach(Array(rows.enumerated()), id: \.element.key) { index, record in
                 QuickSessionResumeRow(
                     record: record,
                     lowercasedQuery: lowerQuery,
                     now: now,
-                    preventAppActivation: !popoverState.isPinned,
+                    isKeyboardSelected: popoverState.keyboardSelection == index,
+                    showsKeyboardCopied: keyboardCopiedKey == record.key,
                     onOpen: {
                         onOpenSession(record.key, record.origin.usageApp)
                     },
@@ -925,6 +968,7 @@ private struct RecentSessionsQuickSection: View {
                         popoverState.desktopResumeHintVisible = hovering
                     }
                 )
+                .id(record.key)
             }
         }
         .padding(.horizontal, 6)
@@ -953,9 +997,16 @@ private struct RecentSessionsQuickSection: View {
                     .foregroundStyle(PopoverPalette.secondaryText)
                     .lineLimit(1)
                     .transition(.opacity)
+            } else if popoverState.isSearchFocused {
+                Text(tr("↑↓ select · ↩ copy · esc close", "↑↓ 选择 · ↩ 复制 · esc 关闭"))
+                    .font(.system(size: 10))
+                    .foregroundStyle(PopoverPalette.mutedText)
+                    .lineLimit(1)
+                    .transition(.opacity)
             }
         }
         .animation(.easeOut(duration: 0.15), value: popoverState.desktopResumeHintVisible)
+        .animation(.easeOut(duration: 0.15), value: popoverState.isSearchFocused)
         .padding(.horizontal, 14)
         .padding(.top, 8)
     }
@@ -965,7 +1016,8 @@ private struct QuickSessionResumeRow: View {
     let record: SessionHistoryRecord
     let lowercasedQuery: String
     let now: Date
-    let preventAppActivation: Bool
+    let isKeyboardSelected: Bool
+    let showsKeyboardCopied: Bool
     let onOpen: () -> Void
     let onHoverDesktopHintChange: (Bool) -> Void
 
@@ -973,24 +1025,7 @@ private struct QuickSessionResumeRow: View {
 
     private var displayTitle: String {
         if PrivacyDisplay.isEnabled {
-            let dummy = ConversationInfo(
-                key: record.key,
-                conversationID: record.sessionID,
-                app: record.origin.usageApp,
-                title: record.primaryTitle,
-                projectKey: record.cwd ?? "",
-                projectName: record.projectName,
-                projectPath: record.cwd ?? "",
-                projectStatus: record.cwd == nil ? .unassigned : .available,
-                projectSource: .cwd,
-                gitBranch: nil,
-                sourcePaths: [],
-                firstAt: record.lastActiveAt,
-                lastAt: record.lastActiveAt,
-                includesSubtasks: false,
-                cacheCreationAvailable: false
-            )
-            return PrivacyDisplay.conversation(dummy)
+            return PrivacyDisplay.conversation(record.privacyConversationInfo)
         }
         return record.primaryTitle ?? tr("Untitled", "（无标题）")
     }
@@ -1009,15 +1044,21 @@ private struct QuickSessionResumeRow: View {
         } else {
             projectPart = tr("No cwd", "无目录")
         }
-
+        var parts = [projectPart]
+        if !PrivacyDisplay.isEnabled, let branch = record.gitBranch, !branch.isEmpty {
+            parts.append("⎇ \(branch)")
+        }
         if !PrivacyDisplay.isEnabled,
            let matchedSnippet = record.matchingSnippet(lowercasedQuery: lowercasedQuery) {
-            return "\(projectPart) · \(matchedSnippet)"
+            parts.append(matchedSnippet)
+        } else {
+            parts.append(age)
         }
-        return "\(projectPart) · \(age)"
+        return parts.joined(separator: " · ")
     }
 
     var body: some View {
+        let cwdMissing = record.cwdIsMissing
         HStack(alignment: .center, spacing: 8) {
             Button(action: onOpen) {
                 HStack(alignment: .center, spacing: 8) {
@@ -1025,13 +1066,16 @@ private struct QuickSessionResumeRow: View {
 
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 5) {
-                            Text(displayTitle)
-                                .font(.system(size: 11.5, weight: .medium))
-                                .foregroundStyle(hasRealTitle || PrivacyDisplay.isEnabled
-                                    ? PopoverPalette.primaryText
-                                    : PopoverPalette.mutedText)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
+                            HighlightedText(
+                                text: displayTitle,
+                                query: PrivacyDisplay.isEnabled ? "" : lowercasedQuery
+                            )
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(hasRealTitle || PrivacyDisplay.isEnabled
+                                ? PopoverPalette.primaryText
+                                : PopoverPalette.mutedText)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
 
                             if let badge = record.origin.sourceBadge {
                                 Text(badge)
@@ -1044,33 +1088,57 @@ private struct QuickSessionResumeRow: View {
                             }
                         }
 
-                        Text(metaLine)
-                            .font(.system(size: 10.5))
-                            .monospacedDigit()
-                            .foregroundStyle(PopoverPalette.secondaryText)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
+                        HStack(spacing: 3) {
+                            if cwdMissing {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 8.5))
+                                    .foregroundStyle(PopoverPalette.barLowFill)
+                            }
+                            Text(metaLine)
+                                .font(.system(size: 10.5))
+                                .monospacedDigit()
+                                .foregroundStyle(cwdMissing ? PopoverPalette.mutedText : PopoverPalette.secondaryText)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help(PrivacyDisplay.help(record.cwd ?? record.sessionID))
+            .help(cwdMissing
+                  ? tr("Directory no longer exists; the command will skip `cd`", "工作目录已不存在，恢复命令将不带 cd")
+                  : PrivacyDisplay.help(record.cwd ?? record.sessionID))
 
-            CopyResumeCommandButton(
-                resumeCommand: record.resumeCommand,
-                compact: true,
-                preventAppActivation: preventAppActivation,
-                onHoverDesktopHintChange: onHoverDesktopHintChange
-            )
+            if showsKeyboardCopied {
+                Label(tr("Copied", "已复制"), systemImage: "checkmark")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(PopoverPalette.barNormalFill)
+                    .labelStyle(.titleAndIcon)
+                    .transition(.opacity)
+            } else {
+                CopyResumeCommandButton(
+                    resumeCommand: record.resumeCommand,
+                    compact: true,
+                    preventAppActivation: true,
+                    onHoverDesktopHintChange: onHoverDesktopHintChange
+                )
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4.5)
         .background(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.primary.opacity(hovering ? 0.045 : 0))
+                .fill(isKeyboardSelected
+                      ? Color.accentColor.opacity(0.16)
+                      : Color.primary.opacity(hovering ? 0.045 : 0))
         )
         .onHover { hovering = $0 }
+        .contextMenu {
+            SessionContextMenuItems(record: record) {
+                MenuBarStatusController.shared.closePanel(animated: true)
+            }
+        }
     }
 }
