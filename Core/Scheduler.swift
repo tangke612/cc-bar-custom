@@ -252,6 +252,7 @@ final class Scheduler {
                 await appState.refreshQuotas(reason: .periodic)
             case .usage:
                 await appState.usageService.scanPeriodically()
+                await appState.refreshGoogleAPILocalUsageIfNeeded()
                 appState.sessionHistory.refreshInBackground(minAge: 10)
             case .serviceStatus:
                 await appState.refreshServiceStatus()

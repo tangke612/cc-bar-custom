@@ -1,0 +1,214 @@
+import Carbon.HIToolbox
+import SwiftUI
+import XCTest
+@testable import CCBar
+
+final class GoogleAPITests: XCTestCase {
+    private var tempHome: URL!
+
+    override func setUpWithError() throws {
+        tempHome = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempHome, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: tempHome)
+    }
+
+    // MARK: - 能力与模式自动识别
+
+    func testDescriptorCapabilitiesAndModeAutoDetection() {
+        XCTAssertNil(QuotaApp.googleAPI.usageApp)
+        let desc = QuotaProviderDescriptor.descriptor(for: .googleAPI)
+        XCTAssertEqual(desc?.title, "Google API")
+        XCTAssertEqual(desc?.showsCost, true)
+        XCTAssertEqual(desc?.supportsMenuBar, true)
+        XCTAssertEqual(desc?.supportsFloatingHUD, true)
+
+        let aiKey = "AIzaSyTestFakeKey1234567890"
+        let vertexKey = "AQ.Ab8RN6TestFakeVertexExpressKey123"
+        XCTAssertEqual(GoogleAPIMode.auto.resolve(for: aiKey), .aiStudio)
+        XCTAssertEqual(GoogleAPIMode.auto.resolve(for: vertexKey), .vertexExpress)
+        XCTAssertEqual(GoogleAPIMode.aiStudio.resolve(for: vertexKey), .aiStudio)
+        XCTAssertEqual(GoogleAPIMode.vertexExpress.resolve(for: aiKey), .vertexExpress)
+    }
+
+    // MARK: - .env 与安全启动脚本
+
+    func testLoadsFromGeminiDotEnvBeforeEnvironment() throws {
+        let envURL = tempHome.appendingPathComponent(".gemini/.env")
+        try FileManager.default.createDirectory(at: envURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let content = """
+        # Comment line
+        export GEMINI_API_KEY="AIzaSyDotEnvKey_1234567890" # inline comment
+        GOOGLE_API_KEY='AQ.FallbackIgnored_123456'
+        """
+        try content.write(to: envURL, atomically: true, encoding: .utf8)
+
+        let session = GoogleAPIAuth.load(
+            homeDirectory: tempHome,
+            environment: ["GEMINI_API_KEY": "AIzaSyProcessEnvKey_9999999"],
+            preference: .automatic,
+            mode: .auto
+        )
+        XCTAssertEqual(session?.source, .geminiDotEnv)
+        XCTAssertEqual(session?.apiKey, "AIzaSyDotEnvKey_1234567890")
+        XCTAssertEqual(session?.resolvedMode, .aiStudio)
+
+        try FileManager.default.removeItem(at: envURL)
+        let envSession = GoogleAPIAuth.load(
+            homeDirectory: tempHome,
+            environment: ["GOOGLE_API_KEY": "AQ.VertexExpressEnvKey_987654321"],
+            preference: .automatic,
+            mode: .auto
+        )
+        XCTAssertEqual(envSession?.source, .environment)
+        XCTAssertEqual(envSession?.resolvedMode, .vertexExpress)
+    }
+
+    func testSyncLaunchEnvFilePermissionsAndCommandSafety() throws {
+        let envFile = tempHome.appendingPathComponent("CCBar/google-api.env")
+        let aiKey = "AIzaSySecretUnitTestKey_12345678"
+        let aiSession = GoogleAPIAuthSession(apiKey: aiKey, source: .manualKeychain, resolvedMode: .aiStudio)
+
+        XCTAssertTrue(GoogleAPIAuth.syncLaunchEnvFile(session: aiSession, envFileURL: envFile))
+        let attrs = try FileManager.default.attributesOfItem(atPath: envFile.path)
+        let perms = attrs[.posixPermissions] as? NSNumber
+        XCTAssertEqual(perms?.intValue, 0o600)
+
+        let aiContents = try String(contentsOf: envFile, encoding: .utf8)
+        XCTAssertTrue(aiContents.contains("export GEMINI_CLI_AUTH_OVERRIDE='gemini-api-key'"))
+        XCTAssertTrue(aiContents.contains("export GEMINI_API_KEY='\(aiKey)'"))
+        XCTAssertTrue(aiContents.contains("unset GOOGLE_GENAI_USE_VERTEXAI"))
+
+        let vertexKey = "AQ.Ab8RN6SecretVertexKey_87654321"
+        let vertexSession = GoogleAPIAuthSession(apiKey: vertexKey, source: .manualKeychain, resolvedMode: .vertexExpress)
+        XCTAssertTrue(GoogleAPIAuth.syncLaunchEnvFile(session: vertexSession, envFileURL: envFile))
+        let vertexContents = try String(contentsOf: envFile, encoding: .utf8)
+        XCTAssertTrue(vertexContents.contains("export GEMINI_CLI_AUTH_OVERRIDE='vertex-ai'"))
+        XCTAssertTrue(vertexContents.contains("export GOOGLE_GENAI_USE_VERTEXAI='true'"))
+        XCTAssertTrue(vertexContents.contains("export GOOGLE_API_KEY='\(vertexKey)'"))
+        XCTAssertTrue(vertexContents.contains("unset GEMINI_API_KEY"))
+
+        let command = GoogleAPIAuth.buildQuickLaunchCommand(
+            envFileURL: envFile,
+            directory: "~/My Projects/app's",
+            model: "gemini-2.5-pro",
+            yoloEnabled: true,
+            homeDirectory: tempHome
+        )
+        XCTAssertFalse(command.contains(vertexKey), "明文 API Key 绝不能进入启动命令或剪贴板")
+        XCTAssertTrue(command.contains("cd '\(tempHome.path)/My Projects/app'\\''s'"))
+        XCTAssertTrue(command.contains("source '\(envFile.path)'"))
+        XCTAssertTrue(command.contains("gemini -y -m 'gemini-2.5-pro'"))
+    }
+
+    // MARK: - Gemini CLI JSONL 去重与费用计算
+
+    func testJSONLDeduplicatesByMessageIDAndSummarizesPeriods() throws {
+        let chatsDir = tempHome.appendingPathComponent(".gemini/tmp/demo-project/chats", isDirectory: true)
+        try FileManager.default.createDirectory(at: chatsDir, withIntermediateDirectories: true)
+
+        var cal = GoogleAPILocalUsage.gregorianCalendar(timeZone: TimeZone(secondsFromGMT: 8 * 3600)!)
+        cal.firstWeekday = 2 // Monday
+        let now = cal.date(from: DateComponents(year: 2026, month: 11, day: 15, hour: 12, minute: 0))!
+        let earlierToday = cal.date(from: DateComponents(year: 2026, month: 11, day: 15, hour: 9, minute: 0))!
+        let earlierThisMonth = cal.date(from: DateComponents(year: 2026, month: 11, day: 2, hour: 10, minute: 0))!
+
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime]
+
+        // msg-1 先写 tokens:null，再写完整 tokens（含 1M input 与 500K cached），不能重复计费。
+        let sessionURL = chatsDir.appendingPathComponent("session-2026-11-15.jsonl")
+        let lines = [
+            #"{"id":"u1","timestamp":"\#(iso.string(from: earlierToday))","type":"user","content":"hello"}"#,
+            #"{"id":"m1","timestamp":"\#(iso.string(from: earlierToday))","type":"gemini","model":"gemini-2.5-flash","tokens":null}"#,
+            #"{"id":"m1","timestamp":"\#(iso.string(from: earlierToday))","type":"gemini","model":"gemini-2.5-flash","tokens":{"input":100000,"output":20000,"cached":40000,"thoughts":5000,"tool":0,"total":125000}}"#,
+            #"{"id":"m2","timestamp":"\#(iso.string(from: earlierThisMonth))","type":"gemini","model":"gemini-2.5-flash","tokens":{"input":100000,"output":10000,"cached":0,"thoughts":0,"tool":0,"total":110000}}"#,
+        ].joined(separator: "\n")
+        try lines.write(to: sessionURL, atomically: true, encoding: .utf8)
+
+        let samples = GoogleAPILocalUsage.parseSessionFile(at: sessionURL)
+        XCTAssertEqual(samples.count, 2)
+        XCTAssertEqual(samples[0].input, 100_000)
+        XCTAssertEqual(samples[0].cached, 40_000)
+        XCTAssertEqual(samples[0].thoughts, 5_000)
+
+        let summary = GoogleAPILocalUsage.summarize(samples: samples, now: now, calendar: cal)
+        XCTAssertEqual(summary.todayRequests, 1)
+        XCTAssertEqual(summary.todayTokens, 125_000)
+        XCTAssertEqual(summary.monthTokens, 235_000)
+        XCTAssertTrue(summary.todayCostUSD > 0)
+        XCTAssertTrue(summary.monthCostUSD > summary.todayCostUSD)
+    }
+
+    // MARK: - 预算快照与日志脱敏
+
+    func testBudgetSnapshotUnlimitedVsCapped() {
+        let now = Date()
+        let usage = GoogleAPIUsageSummary(todayCostUSD: Decimal(2.5), weekCostUSD: Decimal(5), monthCostUSD: Decimal(20))
+
+        let unlimited = GoogleAPIQuotaClient.makeSnapshot(
+            mode: .vertexExpress,
+            usage: usage,
+            dailyBudgetUSD: 0,
+            monthlyBudgetUSD: 0,
+            now: now
+        )
+        XCTAssertEqual(unlimited.isUnlimited, true)
+        XCTAssertEqual(unlimited.planType, "Vertex Express")
+        XCTAssertNotNil(unlimited.primaryLimit)
+        XCTAssertNil(unlimited.secondaryLimit)
+
+        let capped = GoogleAPIQuotaClient.makeSnapshot(
+            mode: .aiStudio,
+            usage: usage,
+            dailyBudgetUSD: 10,
+            monthlyBudgetUSD: 100,
+            now: now
+        )
+        XCTAssertEqual(capped.isUnlimited, false)
+        XCTAssertEqual(capped.primaryLimit?.id, "google-api-daily")
+        XCTAssertEqual(capped.primaryLimit?.window.remainingPercent ?? -1, 75, accuracy: 0.01)
+        XCTAssertEqual(capped.secondaryLimit?.id, "google-api-monthly")
+        XCTAssertEqual(capped.secondaryLimit?.window.remainingPercent ?? -1, 80, accuracy: 0.01)
+    }
+
+    func testRedactScrubsGoogleAPIKeys() {
+        let aiKey = "AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q"
+        let vertexKey = "AQ.Ab8RN6P9Q8R7S6T5U4V3W2X1Y0Z"
+        let output = Redact.scrub("failed with \(aiKey) and \(vertexKey)")
+        XCTAssertFalse(output.contains(aiKey))
+        XCTAssertFalse(output.contains(vertexKey))
+        XCTAssertFalse(output.contains(String(aiKey.suffix(12))))
+        XCTAssertFalse(output.contains(String(vertexKey.suffix(12))))
+    }
+
+    @MainActor func testGlobalHotKeyAssignsDistinctIDs() {
+        let hk1 = GlobalHotKey(keyCode: kVK_ANSI_K, modifiers: controlKey | optionKey) {}
+        let hk2 = GlobalHotKey(keyCode: kVK_ANSI_G, modifiers: controlKey | optionKey) {}
+        XCTAssertNotEqual(hk1.id, hk2.id)
+    }
+
+    @MainActor func testAppAppearanceModeDefaultsToDarkAndPersists() {
+        let suiteName = "ccbar.tests.appearance.\(UUID().uuidString)"
+        let suite = UserDefaults(suiteName: suiteName)!
+        defer { suite.removePersistentDomain(forName: suiteName) }
+
+        let initial = SettingsStore(defaults: suite)
+        XCTAssertEqual(initial.appAppearanceMode, .dark)
+
+        initial.appAppearanceMode = .light
+        XCTAssertEqual(SettingsStore(defaults: suite).appAppearanceMode, .light)
+
+        initial.appAppearanceMode = .system
+        XCTAssertEqual(SettingsStore(defaults: suite).appAppearanceMode, .system)
+
+        XCTAssertNil(AppAppearanceMode.system.nsAppearance)
+        XCTAssertEqual(AppAppearanceMode.light.nsAppearance?.name, .aqua)
+        XCTAssertEqual(AppAppearanceMode.dark.nsAppearance?.name, .darkAqua)
+        XCTAssertNil(AppAppearanceMode.system.preferredColorScheme)
+        XCTAssertEqual(AppAppearanceMode.light.preferredColorScheme, ColorScheme.light)
+        XCTAssertEqual(AppAppearanceMode.dark.preferredColorScheme, ColorScheme.dark)
+    }
+}

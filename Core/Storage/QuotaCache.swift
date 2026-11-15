@@ -60,6 +60,11 @@ nonisolated struct QuotaCachePayload: Sendable, Equatable, Codable {
         set { providers[.opencodeGo] = newValue }
     }
 
+    var googleAPI: QuotaCacheRecord? {
+        get { providers[.googleAPI] }
+        set { providers[.googleAPI] = newValue }
+    }
+
     private enum CodingKeys: String, CodingKey {
         case version
         case providers

@@ -35,6 +35,7 @@ struct MainWindowRootView: View {
         .onDisappear {
             NSApp.setActivationPolicy(.accessory)
         }
+        .ccPreferredAppearance()
     }
 }
 

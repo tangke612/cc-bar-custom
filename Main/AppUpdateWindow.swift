@@ -77,6 +77,7 @@ struct AppUpdateWindow: View {
             .padding(20)
         }
         .frame(minWidth: 500, minHeight: 380)
+        .ccPreferredAppearance()
     }
 
     private var title: String {

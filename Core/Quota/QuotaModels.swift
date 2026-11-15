@@ -7,6 +7,7 @@ nonisolated enum QuotaApp: String, Sendable, Codable, CaseIterable, Hashable {
     case cursor
     case commandCode
     case opencodeGo
+    case googleAPI
 
     /// 对应的用量数据源；`nil` = 该服务无用量统计数据（如仅提供额度监控）。
     var usageApp: UsageApp? {
@@ -15,7 +16,7 @@ nonisolated enum QuotaApp: String, Sendable, Codable, CaseIterable, Hashable {
         case .claude: return .claude
         case .cursor: return .cursor
         case .antigravity: return .antigravity
-        case .commandCode, .opencodeGo: return nil
+        case .commandCode, .opencodeGo, .googleAPI: return nil
         }
     }
 }
@@ -92,6 +93,16 @@ nonisolated struct QuotaProviderDescriptor: Sendable, Hashable, Identifiable {
             logoName: "opencode",
             fallback: "G",
             showsCost: false,
+            supportsMenuBar: true,
+            supportsFloatingHUD: true
+        ),
+        QuotaProviderDescriptor(
+            app: .googleAPI,
+            title: "Google API",
+            vendor: "Google",
+            logoName: "googleapi",
+            fallback: "G",
+            showsCost: true,
             supportsMenuBar: true,
             supportsFloatingHUD: true
         ),

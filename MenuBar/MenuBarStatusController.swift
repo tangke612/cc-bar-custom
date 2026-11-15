@@ -60,6 +60,8 @@ final class MenuBarStatusController: NSObject {
     private var localKeyMonitor: Any?
     private var globalMouseDownMonitor: Any?
     private var hotKey: GlobalHotKey?
+    private var googleAPIHotKey: GlobalHotKey?
+    private var registeredGoogleAPIPreset: GoogleAPIQuickHotKeyPreset?
 
     private override init() {
         super.init()
@@ -74,6 +76,8 @@ final class MenuBarStatusController: NSObject {
         observeBadgeInputs()
         observeOnboardingAndNotificationSettingsIfNeeded()
         observeHotKeySetting()
+        observeGoogleAPIHotKeySetting()
+        observeAppearanceSetting()
         updateStatusButtonBadge()
     }
 
@@ -125,7 +129,10 @@ final class MenuBarStatusController: NSObject {
             }
         )
         let panel = QuotaHoverPanel()
+        let mode = SettingsStore.shared.appAppearanceMode
+        panel.appearance = mode.nsAppearance
         panel.contentViewController = controller
+        (controller.view as? PanelEffectView)?.updateBorderColor()
         panel.onCancel = { [weak self] in self?.handleEscapeKey() }
         self.panel = panel
         self.contentController = controller
@@ -149,6 +156,48 @@ final class MenuBarStatusController: NSObject {
         } else {
             hotKey?.unregister()
         }
+    }
+
+    private func observeGoogleAPIHotKeySetting() {
+        withObservationTracking {
+            _ = SettingsStore.shared.googleAPIHotKeyEnabled
+            _ = SettingsStore.shared.googleAPIHotKeyPreset
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.observeGoogleAPIHotKeySetting()
+            }
+        }
+        let settings = SettingsStore.shared
+        if settings.googleAPIHotKeyEnabled {
+            let preset = settings.googleAPIHotKeyPreset
+            if googleAPIHotKey == nil || registeredGoogleAPIPreset != preset {
+                googleAPIHotKey?.unregister()
+                googleAPIHotKey = GlobalHotKey(keyCode: preset.keyCode, modifiers: preset.modifiers) { [weak self] in
+                    guard let self, let appState = self.appState else { return }
+                    GoogleAPIQuickLaunch.launchInTerminal(appState: appState)
+                }
+                registeredGoogleAPIPreset = preset
+            }
+            googleAPIHotKey?.register()
+        } else {
+            googleAPIHotKey?.unregister()
+        }
+    }
+
+    private func observeAppearanceSetting() {
+        withObservationTracking {
+            _ = SettingsStore.shared.appAppearanceMode
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.observeAppearanceSetting()
+            }
+        }
+        let mode = SettingsStore.shared.appAppearanceMode
+        panel?.appearance = mode.nsAppearance
+        (contentController?.view as? PanelEffectView)?.updateBorderColor()
+        windows.applyAppearance(mode)
+        FloatingPanelController.shared.applyAppearance(mode)
+        AppUpdater.shared.applyAppearance(mode)
     }
 
     // MARK: - Reactive Menu Bar Badge & Settings Observation

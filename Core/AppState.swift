@@ -150,6 +150,13 @@ final class AppState {
             }
         }
     }
+    var googleAPIAccount: GoogleAPIAuthSession? {
+        didSet {
+            if oldValue?.accountKey != googleAPIAccount?.accountKey {
+                primaryAlertEntryVersions[.googleAPI, default: 0] &+= 1
+            }
+        }
+    }
     var codexError: String?
     var claudeError: String?
     /// 用户拒绝过读取 Claude Desktop 登录所需的钥匙串授权，且本机有 Desktop 登录数据。
@@ -164,6 +171,9 @@ final class AppState {
     private var isPresentingCursorAccessAlert = false
     var commandCodeError: String?
     var opencodeGoError: String?
+    var googleAPIError: String?
+    var googleAPIUsageSummary: GoogleAPIUsageSummary?
+    var shouldPresentGoogleAPISheet = false
 
     // MARK: 导入的 Codex 副账号
     //
@@ -285,6 +295,22 @@ final class AppState {
         get { refreshState(for: .opencodeGo) }
         set { updatePrimaryState(.opencodeGo) { $0.refresh = newValue } }
     }
+    var googleAPIQuota: QuotaSnapshot? {
+        get { quotaSnapshot(for: .googleAPI) }
+        set { updatePrimaryState(.googleAPI) { $0.snapshot = newValue } }
+    }
+    var googleAPIQuotaError: String? {
+        get { quotaError(for: .googleAPI) }
+        set { updatePrimaryState(.googleAPI) { $0.error = newValue } }
+    }
+    var googleAPIQuotaSource: QuotaSnapshotSource? {
+        get { quotaSource(for: .googleAPI) }
+        set { updatePrimaryState(.googleAPI) { $0.source = newValue } }
+    }
+    var googleAPIRefreshState: QuotaRefreshState {
+        get { refreshState(for: .googleAPI) }
+        set { updatePrimaryState(.googleAPI) { $0.refresh = newValue } }
+    }
     var quotaHistory = QuotaHistoryPayload()
     var quotaCycles = QuotaCyclePayload()
 
@@ -335,6 +361,8 @@ final class AppState {
         case .opencodeGo:
             // Go 没有账号资料，只能用 key 的完整 SHA-256 摘要区分账号；摘要不可逆，不含 key 片段。
             return QuotaAlertIdentity(app: app, accountID: opencodeGoAccount?.accountKey, userID: nil)
+        case .googleAPI:
+            return QuotaAlertIdentity(app: app, accountID: googleAPIAccount?.accountKey, userID: nil)
         }
     }
 
@@ -347,6 +375,7 @@ final class AppState {
         case .cursor: name = cursorAccount?.email
         case .commandCode: name = commandCodeAccount?.login ?? commandCodeAccount?.email
         case .opencodeGo: name = nil
+        case .googleAPI: name = googleAPIAccount?.planLabel
         }
         return nonEmpty(name) ?? QuotaProviderDescriptor.descriptor(for: app)?.title ?? app.rawValue
     }
@@ -481,6 +510,7 @@ final class AppState {
         handleCursorAccessRequest()
         await loadCommandCode(allowDuringTermination: true)
         await loadOpenCodeGo(allowDuringTermination: true)
+        await loadGoogleAPI(allowDuringTermination: true)
         recordCachedQuotaCycleObservations()
         logCredentialSummary()
 
@@ -498,6 +528,7 @@ final class AppState {
         sessionHistory.refreshInBackground(minAge: 0)
         Task {
             await usageService.scanNow()
+            await refreshGoogleAPILocalUsageIfNeeded()
             await usageService.rebuildCycleUsageIfNeeded()
             // load 时修复过超长周期记录：旧 rollup 桶按污染窗口切分过，必须重算。
             // 放在初始重建之后，避免与全量重建的桶清空互相干扰（两者都能自愈，
@@ -542,6 +573,7 @@ final class AppState {
             guard let self else { return }
             await self.refreshQuotas(reason: .userInitiated)
             await self.usageService.scanNow()
+            await self.refreshGoogleAPILocalUsageIfNeeded()
             await self.sessionHistory.refreshNow()
             await self.refreshServiceStatus()
         }
@@ -570,13 +602,14 @@ final class AppState {
                 || SettingsStore.shared.isUsageServiceVisible(.cursor),
             showCommandCode: SettingsStore.shared.isProviderEnabled(.commandCode),
             showOpenCodeGo: SettingsStore.shared.isProviderEnabled(.opencodeGo),
+            showGoogleAPI: SettingsStore.shared.isProviderEnabled(.googleAPI),
             hasVisibleImported: importedCodexAccounts.contains(where: \.visibleInPopover)
         )
         AppLog.debug(.quota, """
             refresh plan reason=\(reason) codex=\(plan.refreshCodex) claude=\(plan.refreshClaude) \
             antigravity=\(plan.refreshAntigravity) cursor=\(plan.refreshCursor) \
             commandCode=\(plan.refreshCommandCode) opencodeGo=\(plan.refreshOpenCodeGo) \
-            imported=\(plan.refreshImported)
+            googleAPI=\(plan.refreshGoogleAPI) imported=\(plan.refreshImported)
             """)
         // 第一步串行读本地凭据。读取可能弹出钥匙串授权框，串行时一次只出现一个。
         if plan.refreshCodex { await loadCodex() }
@@ -588,6 +621,7 @@ final class AppState {
         }
         if plan.refreshCommandCode { await loadCommandCode() }
         if plan.refreshOpenCodeGo { await loadOpenCodeGo() }
+        if plan.refreshGoogleAPI { await loadGoogleAPI() }
 
         // 第二步各服务并发取数，一个服务超时不再推迟其他服务。子任务都回到 MainActor 执行，
         // 只在 await 处交错；各服务的 inFlight / 429 退避 / 最短间隔照常按服务独立判断。
@@ -636,6 +670,11 @@ final class AppState {
             if plan.refreshOpenCodeGo {
                 group.addTask { [weak self] in
                     await self?.loadOpenCodeGoQuota(reason: reason)
+                }
+            }
+            if plan.refreshGoogleAPI {
+                group.addTask { [weak self] in
+                    await self?.loadGoogleAPIQuota(reason: reason)
                 }
             }
         }
@@ -2018,6 +2057,50 @@ final class AppState {
         saveQuotaCache()
     }
 
+    /// 读取 `~/.gemini/.env`、环境变量或 cc-bar 钥匙串里的 Google API Key，
+    /// 并同步更新 `0600` 权限的安全启动 env 文件。
+    func loadGoogleAPI(allowDuringTermination: Bool = false) async {
+        guard beginStateOperation(allowDuringTermination: allowDuringTermination) else { return }
+        defer { activeStateOperations -= 1 }
+        let pref = SettingsStore.shared.googleAPICredentialPreference
+        let mode = SettingsStore.shared.googleAPIMode
+        let next = await Task.detached(priority: .utility) {
+            let loaded = GoogleAPIAuth.load(preference: pref, mode: mode)
+            GoogleAPIAuth.syncLaunchEnvFile(session: loaded)
+            return loaded
+        }.value
+
+        guard let next else {
+            googleAPIAccount = nil
+            googleAPIError = "未检测到 Google API Key"
+            return
+        }
+
+        let changedFromRuntime = googleAPIAccount.map { $0.accountKey != next.accountKey } ?? false
+        let changedFromCache: Bool = {
+            guard googleAPIAccount == nil,
+                  let cachedID = quotaCache.googleAPI?.accountID?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !cachedID.isEmpty
+            else { return false }
+            return cachedID != next.accountKey
+        }()
+        if changedFromRuntime || changedFromCache {
+            resetGoogleAPIQuotaState()
+        }
+
+        googleAPIAccount = next
+        googleAPIError = nil
+    }
+
+    private func resetGoogleAPIQuotaState() {
+        googleAPIQuota = nil
+        googleAPIQuotaSource = nil
+        googleAPIQuotaError = nil
+        resetPrimaryQuotaRefreshState(.googleAPI)
+        quotaCache.googleAPI = nil
+        saveQuotaCache()
+    }
+
     private func loadCodexQuota(reason: QuotaRefreshReason) async {
         guard beginQuotaRefresh(.codex, reason: reason) else { return }
         let alertEntryVersion = codexAlertEntryVersion
@@ -2527,6 +2610,92 @@ final class AppState {
         return error.userMessage
     }
 
+    private func loadGoogleAPIQuota(reason: QuotaRefreshReason) async {
+        guard beginQuotaRefresh(.googleAPI, reason: reason) else { return }
+        let alertEntryVersion = primaryQuotaAlertVersion(for: .googleAPI)
+        let alertSettingsVersion = SettingsStore.shared.quotaAlertRuntimeVersion
+        defer { googleAPIRefreshState.inFlight = false }
+
+        guard let session = googleAPIAccount else {
+            markQuotaFailure(.googleAPI, noAccountMessage)
+            return
+        }
+
+        let dailyBudget = SettingsStore.shared.googleAPIDailyBudgetUSD
+        let monthlyBudget = SettingsStore.shared.googleAPIMonthlyBudgetUSD
+
+        func apply(_ response: (snapshot: QuotaSnapshot, usage: GoogleAPIUsageSummary)) {
+            googleAPIUsageSummary = response.usage
+            storeQuota(.googleAPI, snapshot: response.snapshot, source: .api)
+            observePrimaryQuota(response.snapshot, settingsVersion: alertSettingsVersion)
+        }
+
+        let result = await GoogleAPIQuotaClient.fetch(
+            session: session,
+            dailyBudgetUSD: dailyBudget,
+            monthlyBudgetUSD: monthlyBudget
+        )
+        guard primaryQuotaAlertVersion(for: .googleAPI) == alertEntryVersion else { return }
+        switch result {
+        case .success(let response):
+            apply(response)
+        case .failure(let error):
+            let reload = await reloadCredentialAfterRejection(
+                error,
+                rejectedStatusCodes: [401, 403],
+                current: session,
+                key: \.accountKey,
+                reload: { await self.loadGoogleAPI(); return self.googleAPIAccount }
+            )
+            switch reload {
+            case .notRejected, .unchanged:
+                guard primaryQuotaAlertVersion(for: .googleAPI) == alertEntryVersion else { return }
+                markQuotaFailure(.googleAPI, error.userMessage, error: error)
+            case .changed(let reloaded):
+                let retryEntryVersion = primaryQuotaAlertVersion(for: .googleAPI)
+                let retry = await GoogleAPIQuotaClient.fetch(
+                    session: reloaded,
+                    dailyBudgetUSD: dailyBudget,
+                    monthlyBudgetUSD: monthlyBudget
+                )
+                guard primaryQuotaAlertVersion(for: .googleAPI) == retryEntryVersion else { return }
+                switch retry {
+                case .success(let response):
+                    apply(response)
+                case .failure(let retryError):
+                    markQuotaFailure(.googleAPI, retryError.userMessage, error: retryError)
+                }
+            }
+        }
+    }
+
+    func refreshGoogleAPILocalUsageIfNeeded(rebuildSnapshot: Bool = false) async {
+        guard beginStateOperation() else { return }
+        defer { activeStateOperations -= 1 }
+        guard SettingsStore.shared.isProviderEnabled(.googleAPI) || rebuildSnapshot else { return }
+
+        let summary = await GoogleAPILocalUsage.shared.scan()
+        googleAPIUsageSummary = summary
+
+        guard let session = googleAPIAccount else { return }
+        let existingSnapshot = googleAPIQuota
+        guard rebuildSnapshot || existingSnapshot != nil else { return }
+
+        let dailyBudget = SettingsStore.shared.googleAPIDailyBudgetUSD
+        let monthlyBudget = SettingsStore.shared.googleAPIMonthlyBudgetUSD
+        let updated = GoogleAPIQuotaClient.makeSnapshot(
+            mode: session.resolvedMode,
+            usage: summary,
+            dailyBudgetUSD: dailyBudget,
+            monthlyBudgetUSD: monthlyBudget,
+            now: existingSnapshot?.fetchedAt ?? Date()
+        )
+        storeQuota(.googleAPI, snapshot: updated, source: googleAPIQuotaSource ?? .api)
+        if updated.isUnlimited != true {
+            observePrimaryQuota(updated, settingsVersion: SettingsStore.shared.quotaAlertRuntimeVersion)
+        }
+    }
+
     /// Cursor 用量接口同样使用 Cursor.app 的只读登录态。401 时只重读一次 SQLite，
     /// 且 token 必须实际变化才重试；不调用 OAuth refresh，也不影响已成功的额度快照。
     ///
@@ -2645,14 +2814,14 @@ final class AppState {
             recordClaudeQuotaHistory(snapshot: mergedSnapshot, sampledAt: updatedAt)
         case .antigravity:
             recordAntigravityQuotaHistory(snapshot: mergedSnapshot, sampledAt: updatedAt)
-        case .cursor, .commandCode, .opencodeGo:
+        case .cursor, .commandCode, .opencodeGo, .googleAPI:
             break
         }
         let cycleApp: UsageApp?
         switch app {
         case .codex: cycleApp = .codex
         case .claude: cycleApp = .claude
-        case .antigravity, .cursor, .commandCode, .opencodeGo: cycleApp = nil
+        case .antigravity, .cursor, .commandCode, .opencodeGo, .googleAPI: cycleApp = nil
         }
         if let cycleApp, let accountID {
             recordQuotaCycles(
@@ -2684,6 +2853,8 @@ final class AppState {
             return commandCodeAccount?.accountKey
         case .opencodeGo:
             return opencodeGoAccount?.accountKey
+        case .googleAPI:
+            return googleAPIAccount?.accountKey
         }
     }
 
@@ -2777,6 +2948,11 @@ final class AppState {
             AppLog.info(.credentials, "opencode go source=\(c.source.rawValue)")
         } else {
             AppLog.info(.credentials, "opencode go not loaded: \(Redact.message(opencodeGoError))")
+        }
+        if let c = googleAPIAccount {
+            AppLog.info(.credentials, "google api source=\(c.source.rawValue) mode=\(c.resolvedMode.rawValue)")
+        } else {
+            AppLog.info(.credentials, "google api not loaded: \(Redact.message(googleAPIError))")
         }
     }
 
@@ -2877,6 +3053,19 @@ final class AppState {
                 lines.append((
                     "opencodeGo", .warn,
                     "opencode go fetch failed: \(Redact.message(opencodeGoQuotaError ?? opencodeGoError))"
+                ))
+            }
+        }
+        if settings.isProviderEnabled(.googleAPI) {
+            if let q = googleAPIQuota {
+                lines.append((
+                    "googleAPI", .info,
+                    "google api source=\(googleAPIQuotaSource?.rawValue ?? "—") plan=\(q.planType ?? "—") \(format(q))"
+                ))
+            } else {
+                lines.append((
+                    "googleAPI", .warn,
+                    "google api fetch failed: \(Redact.message(googleAPIQuotaError ?? googleAPIError))"
                 ))
             }
         }

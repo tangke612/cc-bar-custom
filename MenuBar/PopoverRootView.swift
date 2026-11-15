@@ -12,7 +12,16 @@ import AppKit
 struct PopoverRootView: View {
     @Environment(AppState.self) private var appState
     @Environment(MenuBarPopoverState.self) private var popoverState
+    @Environment(\.colorScheme) private var colorScheme
     @State private var refreshRotation: Double = 0
+
+    private var isDarkMode: Bool {
+        switch SettingsStore.shared.appAppearanceMode {
+        case .dark: return true
+        case .light: return false
+        case .system: return colorScheme == .dark
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -45,6 +54,13 @@ struct PopoverRootView: View {
             }
         }
         .frame(width: 340)
+        // 深色模式下为透光毛玻璃压一层深色底，避免桌面背后是白色网页时把弹窗透亮晃眼。
+        .background(
+            isDarkMode
+                ? Color(red: 22 / 255, green: 22 / 255, blue: 26 / 255).opacity(0.55)
+                : Color.clear
+        )
+        .ccPreferredAppearance()
         // 转圈由 appState.isRefreshing 统一驱动:无论刷新从哪个入口发起
         // (点击刷新按钮、⌘R 全局快捷键),只要整体刷新真正开始,按钮就转一圈。
         .onChange(of: appState.isRefreshing) { _, refreshing in
@@ -55,7 +71,7 @@ struct PopoverRootView: View {
     // MARK: Header
 
     private var header: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 3) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(tr("Quota", "额度"))
                     .font(.system(size: 13, weight: .semibold))
@@ -81,6 +97,20 @@ struct PopoverRootView: View {
                     .help(headerStateTooltip(state))
                     .padding(.trailing, 4)
             }
+
+            Button {
+                SettingsStore.shared.appAppearanceMode = isDarkMode ? .light : .dark
+            } label: {
+                Image(systemName: isDarkMode ? "moon.stars.fill" : "sun.max")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(PopoverPalette.secondaryText)
+            }
+            .buttonStyle(PopoverIconButtonStyle())
+            .help(
+                isDarkMode
+                    ? tr("Dark mode (click for Light; System option in Settings)", "当前深色模式（点击切换浅色，设置中可选跟随系统）")
+                    : tr("Light mode (click for Dark; System option in Settings)", "当前浅色模式（点击切换深色，设置中可选跟随系统）")
+            )
 
             if popoverState.isPinned {
                 Button {
@@ -272,10 +302,17 @@ struct PopoverRootView: View {
             email = nil
             plan = nil
             fallback = "OpenCode"
+        case .googleAPI:
+            email = nil
+            plan = appState.googleAPIAccount?.planLabel ?? appState.quotaSnapshot(for: .googleAPI)?.planType
+            fallback = "Google"
         }
         // 每个服务只有一个主账号，隐私模式或关闭「弹出面板显示邮箱」时直接不显示邮箱，不必换成「账号 NN」。
         if showsEmail, let email, !email.isEmpty { parts.append(email) }
         if let plan, !plan.isEmpty { parts.append(plan) }
+        if app == .googleAPI, SettingsStore.shared.googleAPIHotKeyEnabled {
+            parts.append(SettingsStore.shared.googleAPIHotKeyPreset.symbol)
+        }
         if parts.isEmpty { parts.append(fallback) }
         return parts.joined(separator: " · ")
     }
@@ -294,7 +331,8 @@ struct PopoverRootView: View {
             snapshot: snap,
             error: providerDisplayError(for: provider.app),
             periodSpend: periodSpend(for: provider.app),
-            periodIsBillingCycle: cursorCycleBounds(for: provider.app) != nil,
+            periodIsBillingCycle: cursorCycleBounds(for: provider.app) != nil
+                || (provider.app == .googleAPI && SettingsStore.shared.googleAPIMonthlyBudgetUSD > 0),
             todayCost: todayCost(for: provider.app),
             serviceStatus: serviceStatus(for: provider.app),
             showsCost: provider.showsCost
@@ -311,6 +349,11 @@ struct PopoverRootView: View {
     /// Cursor 额度按计费周期重置，拿得到周期时费用跟周期对齐（本期）；
     /// 其余服务及拿不到周期的 Cursor 仍按自然周（本周）。
     private func periodSpend(for app: QuotaApp) -> Decimal? {
+        if app == .googleAPI {
+            return SettingsStore.shared.googleAPIMonthlyBudgetUSD > 0
+                ? appState.googleAPIUsageSummary?.monthCostUSD
+                : appState.googleAPIUsageSummary?.weekCostUSD
+        }
         if let cycle = cursorCycleBounds(for: app) { return cursorCost(from: cycle.0, to: cycle.1) }
         let (from, to) = Self.weekBounds()
         if app == .cursor { return cursorCost(from: from, to: to) }
@@ -360,6 +403,7 @@ struct PopoverRootView: View {
         case .cursor: cursorTodayCost
         case .commandCode: nil
         case .opencodeGo: nil
+        case .googleAPI: appState.googleAPIUsageSummary?.todayCostUSD
         }
     }
 
@@ -557,6 +601,10 @@ private struct ServiceBlockView: View {
 
             Spacer(minLength: 0)
 
+            if app == .googleAPI {
+                GoogleAPIHeaderButtons()
+            }
+
             // `.unknown` 也要显示(灰点):它现在还承担"本机拉不到 statuspage"这一档,
             // 直接隐藏会让用户以为功能没了,而继续显示绿点则是在说一件不成立的事。
             if let status = serviceStatus {
@@ -641,9 +689,9 @@ private struct ServiceBlockView: View {
 
                         if showsCost {
                             HStack(spacing: 10) {
-                                statInline(value: formatCostInt(todayCost), english: "today", chinese: "今日")
+                                statInline(value: formatCost(todayCost), english: "today", chinese: "今日")
                                 statInline(
-                                    value: formatCostInt(periodSpend),
+                                    value: formatCost(periodSpend),
                                     english: periodIsBillingCycle ? "this cycle" : "this week",
                                     chinese: periodIsBillingCycle ? "本期" : "本周"
                                 )
@@ -827,6 +875,19 @@ private struct ServiceBlockView: View {
         }
     }
 
+    private func formatCost(_ value: Decimal?) -> String {
+        app == .googleAPI ? formatAPICost(value) : formatCostInt(value)
+    }
+
+    private func formatAPICost(_ value: Decimal?) -> String {
+        guard let value else { return "—" }
+        let d = NSDecimalNumber(decimal: value).doubleValue
+        if d <= 0 { return "$0" }
+        if d < 0.01 { return "<$0.01" }
+        if d >= 100 { return formatCostInt(value) }
+        return String(format: "$%.2f", d)
+    }
+
     /// 取整美元金额:`<$1` 用于 0 ~ 0.99,`$0` 仅在 nil/0 时显示。
     private func formatCostInt(_ value: Decimal?) -> String {
         guard let value else { return "—" }
@@ -847,6 +908,120 @@ private struct ServiceBlockView: View {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if oneLine.count <= 110 { return oneLine }
         return String(oneLine.prefix(107)) + "..."
+    }
+}
+
+// MARK: - GoogleAPIHeaderButtons
+
+private struct GoogleAPIHeaderButtons: View {
+    @Environment(AppState.self) private var appState
+    @State private var copied = false
+    @State private var isLaunchHovered = false
+    @State private var isCopyHovered = false
+    @State private var resetTask: Task<Void, Never>?
+
+    var body: some View {
+        HStack(spacing: 5) {
+            launchButton
+            copyButton
+        }
+    }
+
+    private var launchButton: some View {
+        let terminal = SettingsStore.shared.resumeTerminalApp
+        let tip = appState.googleAPIAccount == nil
+            ? tr("Configure Google API & Quick Launch", "配置 Google API 与快速启动")
+            : tr("Launch Gemini CLI in \(terminal.displayName)", "在 \(terminal.displayName) 中启动 Gemini CLI")
+        return HStack(spacing: 3.5) {
+            Image(systemName: "play.fill")
+                .font(.system(size: 8.5, weight: .semibold))
+            Text(tr("Launch", "启动"))
+                .font(.system(size: 10.5, weight: .medium))
+                .lineLimit(1)
+        }
+        .foregroundStyle(isLaunchHovered ? PopoverPalette.primaryText : PopoverPalette.secondaryText)
+        .padding(.horizontal, 6.5)
+        .padding(.vertical, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(isLaunchHovered ? Color.primary.opacity(0.09) : Color.primary.opacity(0.045))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .strokeBorder(Color.primary.opacity(isLaunchHovered ? 0.16 : 0.09), lineWidth: 0.5)
+        )
+        .fixedSize()
+        .overlay {
+            ResumeButtonClickOverlay(
+                toolTip: tip,
+                preventAppActivation: true,
+                isHovered: $isLaunchHovered,
+                onTap: {
+                    GoogleAPIQuickLaunch.launchInTerminal(appState: appState)
+                }
+            )
+        }
+        .animation(.easeOut(duration: 0.12), value: isLaunchHovered)
+    }
+
+    private var copyButton: some View {
+        let tip = tr("Copy Gemini CLI launch command", "复制 Gemini CLI 快速启动命令")
+        return HStack(spacing: 3.5) {
+            Image(systemName: copied ? "checkmark" : "terminal")
+                .font(.system(size: 9.5, weight: .semibold))
+            Text(copied ? tr("Copied", "已复制") : tr("Copy", "复制"))
+                .font(.system(size: 10.5, weight: .medium))
+                .lineLimit(1)
+        }
+        .foregroundStyle(
+            copied
+                ? PopoverPalette.barNormalFill
+                : (isCopyHovered ? PopoverPalette.primaryText : PopoverPalette.secondaryText)
+        )
+        .padding(.horizontal, 6.5)
+        .padding(.vertical, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(
+                    copied
+                        ? Color.green.opacity(0.14)
+                        : (isCopyHovered ? Color.primary.opacity(0.09) : Color.primary.opacity(0.045))
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .strokeBorder(
+                    copied
+                        ? Color.green.opacity(0.35)
+                        : Color.primary.opacity(isCopyHovered ? 0.16 : 0.09),
+                    lineWidth: 0.5
+                )
+        )
+        .fixedSize()
+        .overlay {
+            ResumeButtonClickOverlay(
+                toolTip: tip,
+                preventAppActivation: true,
+                isHovered: $isCopyHovered,
+                onTap: {
+                    if GoogleAPIQuickLaunch.copyCommand(appState: appState) {
+                        copied = true
+                        resetTask?.cancel()
+                        resetTask = Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 1_500_000_000)
+                            guard !Task.isCancelled else { return }
+                            copied = false
+                        }
+                    } else {
+                        appState.mainWindowSession.settingsCategory = .services
+                        appState.shouldPresentGoogleAPISheet = true
+                        MenuBarStatusController.shared.openMainWindow(tab: .settings)
+                    }
+                }
+            )
+        }
+        .animation(.easeOut(duration: 0.14), value: copied)
+        .animation(.easeOut(duration: 0.12), value: isCopyHovered)
     }
 }
 

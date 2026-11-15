@@ -24,6 +24,7 @@ struct OnboardingView: View {
         .frame(width: 620, height: 520)
         .background(.regularMaterial)
         .animation(.easeInOut(duration: 0.25), value: step)
+        .ccPreferredAppearance()
     }
 
     @ViewBuilder

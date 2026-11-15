@@ -60,6 +60,7 @@ struct ImportedCodexAccountsView: View {
         .background(Color.primary.opacity(0.02))
         .sheet(isPresented: $showAddSheet) {
             AddImportedCodexAccountSheet { appState.reloadImportedCodexAccounts() }
+                .ccPreferredAppearance()
         }
         .sheet(item: $selectedResetAccount) { account in
             CodexResetCreditsSheet(
@@ -67,6 +68,7 @@ struct ImportedCodexAccountsView: View {
                 privacyAccountKey: account.id,
                 fetchCredits: { await appState.fetchImportedCodexResetCredits(account: account) }
             )
+            .ccPreferredAppearance()
         }
         .confirmationDialog(
             tr("Remove account?", "删除此账号？"),

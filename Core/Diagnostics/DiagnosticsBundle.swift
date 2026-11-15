@@ -196,6 +196,7 @@ enum DiagnosticsBundle {
         out.row("verbose logging", String(settings.verboseLogging))
         out.row("command code credential", settings.commandCodeCredentialPreference.rawValue)
         out.row("opencode go credential", settings.opencodeGoCredentialPreference.rawValue)
+        out.row("google api credential", "\(settings.googleAPICredentialPreference.rawValue) mode=\(settings.googleAPIMode.rawValue)")
         out.row("onboarding completed", String(settings.didCompleteOnboarding))
         for provider in QuotaProviderDescriptor.allProviders {
             out.row(
@@ -250,6 +251,11 @@ enum DiagnosticsBundle {
             out.row("opencode go", "source=\(c.source.rawValue)")
         } else {
             out.row("opencode go", "not loaded: \(Redact.message(appState.opencodeGoError))")
+        }
+        if let c = appState.googleAPIAccount {
+            out.row("google api", "source=\(c.source.rawValue) mode=\(c.resolvedMode.rawValue)")
+        } else {
+            out.row("google api", "not loaded: \(Redact.message(appState.googleAPIError))")
         }
         out.row("imported codex accounts", String(appState.importedCodexAccounts.count))
     }

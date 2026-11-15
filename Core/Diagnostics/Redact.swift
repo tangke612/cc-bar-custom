@@ -130,6 +130,8 @@ nonisolated enum Redact {
             // 各家 API key / 个人访问令牌
             (#"sk-ant-[A-Za-z0-9_-]{8,}"#, "<redacted:key>"),
             (#"sk-[A-Za-z0-9_-]{16,}"#, "<redacted:key>"),
+            (#"AIza[A-Za-z0-9_-]{20,}"#, "<redacted:key>"),
+            (#"AQ\.[A-Za-z0-9._-]{16,}"#, "<redacted:key>"),
             (#"(?<![A-Za-z0-9])at-[A-Za-z0-9_-]{8,}"#, "<redacted:key>"),
             (#"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"#, "Bearer <redacted>"),
             // `key: value` / `key=value` 形态。`\b` 保证不误伤 hasAccessToken 这类驼峰字段名

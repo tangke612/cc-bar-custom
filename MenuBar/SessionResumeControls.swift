@@ -96,7 +96,7 @@ struct CopyResumeCommandButton: View {
 
 // MARK: - AppKit Click Overlay
 
-private struct ResumeButtonClickOverlay: NSViewRepresentable {
+struct ResumeButtonClickOverlay: NSViewRepresentable {
     let toolTip: String
     let preventAppActivation: Bool
     @Binding var isHovered: Bool
@@ -450,8 +450,12 @@ enum SessionActions {
 
     /// 在选定终端中新开窗口 / 标签执行恢复命令（会切换到该终端，属于用户主动操作）。
     static func runInTerminal(_ command: SessionResumeCommand, app requestedApp: ResumeTerminalApp? = nil) {
+        runShellCommandInTerminal(command.command, app: requestedApp)
+    }
+
+    /// 在选定终端中新开窗口 / 标签执行任意 shell 命令。
+    static func runShellCommandInTerminal(_ shellCommand: String, app requestedApp: ResumeTerminalApp? = nil) {
         let app = requestedApp ?? SettingsStore.shared.resumeTerminalApp
-        let shellCommand = command.command
         switch app {
         case .terminal:
             runAppleScript("""
@@ -576,5 +580,54 @@ extension SessionHistoryRecord {
             includesSubtasks: false,
             cacheCreationAvailable: false
         )
+    }
+}
+
+// MARK: - Google API Quick Launch
+
+@MainActor
+enum GoogleAPIQuickLaunch {
+    static func resolveSession(appState: AppState) -> GoogleAPIAuthSession? {
+        if let cached = appState.googleAPIAccount {
+            return cached
+        }
+        return GoogleAPIAuth.load(
+            preference: SettingsStore.shared.googleAPICredentialPreference,
+            mode: SettingsStore.shared.googleAPIMode
+        )
+    }
+
+    static func currentCommand(session: GoogleAPIAuthSession?) -> String {
+        if let session {
+            GoogleAPIAuth.syncLaunchEnvFile(session: session)
+        }
+        let settings = SettingsStore.shared
+        return GoogleAPIAuth.buildQuickLaunchCommand(
+            directory: settings.googleAPIDefaultDirectory,
+            model: settings.googleAPIDefaultModel,
+            yoloEnabled: settings.googleAPIYoloEnabled
+        )
+    }
+
+    @discardableResult
+    static func copyCommand(appState: AppState) -> Bool {
+        guard let session = resolveSession(appState: appState) else { return false }
+        let cmd = currentCommand(session: session)
+        SessionActions.copy(cmd)
+        return true
+    }
+
+    static func launchInTerminal(appState: AppState) {
+        guard let session = resolveSession(appState: appState) else {
+            appState.mainWindowSession.settingsCategory = .services
+            appState.shouldPresentGoogleAPISheet = true
+            MenuBarStatusController.shared.openMainWindow(tab: .settings)
+            return
+        }
+        let cmd = currentCommand(session: session)
+        if !MenuBarStatusController.shared.popoverState.isPinned {
+            MenuBarStatusController.shared.closePopover()
+        }
+        SessionActions.runShellCommandInTerminal(cmd)
     }
 }

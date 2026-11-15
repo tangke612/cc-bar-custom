@@ -231,7 +231,8 @@ final class QuotaNotificationService {
             guard let result = QuotaAlertPolicy.evaluate(
                 previous: account.windows[key], window: limit.window, kind: limit.kind,
                 threshold: prefs.threshold, observationID: observation.id, now: observation.observedAt,
-                baseline: baseline, allowBillingCycle: observation.raw.app == .cursor || limit.id == "command-code-monthly"
+                baseline: baseline, allowBillingCycle: observation.raw.app == .cursor || observation.raw.app == .googleAPI
+                    || limit.id == "command-code-monthly"
                     || limit.id == "opencode-go-monthly"
             ) else { continue }
             account.windows[key] = result.record
@@ -339,6 +340,8 @@ final class QuotaNotificationService {
         if app == .cursor { return limit.displayName ?? translate("Billing cycle quota", "计费周期额度") }
         if limit.id == "command-code-monthly" { return translate("Monthly credits", "月额度") }
         if limit.id == "opencode-go-monthly" { return translate("Monthly quota", "月额度") }
+        if limit.id == "google-api-daily" { return translate("Daily budget", "日预算") }
+        if limit.id == "google-api-monthly" { return translate("Monthly budget", "月预算") }
         let period: String
         switch limit.kind {
         case .fiveHour:

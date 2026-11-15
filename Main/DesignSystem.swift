@@ -88,9 +88,53 @@ extension QuotaApp {
         case .claude: .claudeAccent
         case .antigravity: .antigravityAccent
         case .cursor: .cursorAccent
-        case .commandCode: Color(red: 24 / 255, green: 24 / 255, blue: 27 / 255)
+        case .commandCode: adaptiveColor(light: (24, 24, 27), dark: (58, 58, 64))
         case .opencodeGo: .opencodeAccent
+        case .googleAPI: adaptiveColor(light: (26, 115, 232), dark: (66, 133, 244))
         }
+    }
+}
+
+extension AppAppearanceMode {
+    var nsAppearance: NSAppearance? {
+        switch self {
+        case .system: return nil
+        case .light: return NSAppearance(named: .aqua)
+        case .dark: return NSAppearance(named: .darkAqua)
+        }
+    }
+
+    var preferredColorScheme: ColorScheme? {
+        switch self {
+        case .system: return nil
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+
+    @MainActor
+    var englishTitle: String {
+        switch self {
+        case .system: return "System"
+        case .light: return "Light"
+        case .dark: return "Dark"
+        }
+    }
+
+    @MainActor
+    var chineseTitle: String {
+        switch self {
+        case .system: return "跟随系统"
+        case .light: return "浅色"
+        case .dark: return "深色"
+        }
+    }
+}
+
+extension View {
+    /// 按用户选择的 App 外观模式同步 SwiftUI 颜色方案。
+    func ccPreferredAppearance() -> some View {
+        preferredColorScheme(SettingsStore.shared.appAppearanceMode.preferredColorScheme)
     }
 }
 

@@ -79,6 +79,14 @@ enum ResetTimeDisplay: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+nonisolated enum AppAppearanceMode: String, CaseIterable, Identifiable, Sendable {
+    case system
+    case light
+    case dark
+
+    var id: String { rawValue }
+}
+
 enum MenuBarWindowChoice: String, CaseIterable, Identifiable {
     case primary
     case weekly
@@ -122,7 +130,7 @@ struct ProviderDisplaySettings: Sendable, Codable, Equatable {
             enabledByDefault
         case .cursor:
             ProviderDisplaySettings(enabled: false, menuBar: false, floatingHUD: false)
-        case .commandCode, .opencodeGo:
+        case .commandCode, .opencodeGo, .googleAPI:
             ProviderDisplaySettings(enabled: false, menuBar: true, floatingHUD: true)
         }
     }
@@ -235,6 +243,54 @@ final class SettingsStore {
     // OpenCode Go 凭据来源偏好
     var opencodeGoCredentialPreference: OpenCodeGoCredentialPreference {
         didSet { defaults.set(opencodeGoCredentialPreference.rawValue, forKey: Keys.opencodeGoCredentialPreference) }
+    }
+
+    // App 界面外观模式（默认深色，仅作用于面板/浮窗/主窗口，不改变菜单栏顶栏图标外观）
+    var appAppearanceMode: AppAppearanceMode {
+        didSet { defaults.set(appAppearanceMode.rawValue, forKey: Keys.appAppearanceMode) }
+    }
+
+    // Google API 凭据、模式、预算与 Gemini CLI 快速启动配置
+    var googleAPICredentialPreference: GoogleAPICredentialPreference {
+        didSet { defaults.set(googleAPICredentialPreference.rawValue, forKey: Keys.googleAPICredentialPreference) }
+    }
+    var googleAPIMode: GoogleAPIMode {
+        didSet { defaults.set(googleAPIMode.rawValue, forKey: Keys.googleAPIMode) }
+    }
+    var googleAPIDailyBudgetUSD: Double {
+        didSet {
+            let clamped = max(0, googleAPIDailyBudgetUSD)
+            if clamped != googleAPIDailyBudgetUSD {
+                googleAPIDailyBudgetUSD = clamped
+                return
+            }
+            defaults.set(clamped, forKey: Keys.googleAPIDailyBudgetUSD)
+        }
+    }
+    var googleAPIMonthlyBudgetUSD: Double {
+        didSet {
+            let clamped = max(0, googleAPIMonthlyBudgetUSD)
+            if clamped != googleAPIMonthlyBudgetUSD {
+                googleAPIMonthlyBudgetUSD = clamped
+                return
+            }
+            defaults.set(clamped, forKey: Keys.googleAPIMonthlyBudgetUSD)
+        }
+    }
+    var googleAPIDefaultDirectory: String {
+        didSet { defaults.set(googleAPIDefaultDirectory, forKey: Keys.googleAPIDefaultDirectory) }
+    }
+    var googleAPIDefaultModel: String {
+        didSet { defaults.set(googleAPIDefaultModel, forKey: Keys.googleAPIDefaultModel) }
+    }
+    var googleAPIYoloEnabled: Bool {
+        didSet { defaults.set(googleAPIYoloEnabled, forKey: Keys.googleAPIYoloEnabled) }
+    }
+    var googleAPIHotKeyEnabled: Bool {
+        didSet { defaults.set(googleAPIHotKeyEnabled, forKey: Keys.googleAPIHotKeyEnabled) }
+    }
+    var googleAPIHotKeyPreset: GoogleAPIQuickHotKeyPreset {
+        didSet { defaults.set(googleAPIHotKeyPreset.rawValue, forKey: Keys.googleAPIHotKeyPreset) }
     }
 
     // 兼容现有调用方的语义化入口。
@@ -461,7 +517,7 @@ final class SettingsStore {
     /// 用于首次启动按凭据检测结果收敛默认开关，已装机用户不受影响。
     let isFreshInstall: Bool
 
-    private init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         isFreshInstall = defaults.data(forKey: Keys.providerDisplaySettings) == nil
             && defaults.object(forKey: Keys.showCodex) == nil
@@ -540,6 +596,22 @@ final class SettingsStore {
         commandCodeCredentialPreference = CommandCodeCredentialPreference(rawValue: ccpRaw) ?? .automatic
         let ogpRaw = defaults.string(forKey: Keys.opencodeGoCredentialPreference) ?? OpenCodeGoCredentialPreference.automatic.rawValue
         opencodeGoCredentialPreference = OpenCodeGoCredentialPreference(rawValue: ogpRaw) ?? .automatic
+        let gapRaw = defaults.string(forKey: Keys.googleAPICredentialPreference) ?? GoogleAPICredentialPreference.automatic.rawValue
+        googleAPICredentialPreference = GoogleAPICredentialPreference(rawValue: gapRaw) ?? .automatic
+        let gamRaw = defaults.string(forKey: Keys.googleAPIMode) ?? GoogleAPIMode.auto.rawValue
+        googleAPIMode = GoogleAPIMode(rawValue: gamRaw) ?? .auto
+        let storedDailyBudget = defaults.object(forKey: Keys.googleAPIDailyBudgetUSD) as? Double ?? 0
+        googleAPIDailyBudgetUSD = storedDailyBudget.isFinite ? max(0, storedDailyBudget) : 0
+        let storedMonthlyBudget = defaults.object(forKey: Keys.googleAPIMonthlyBudgetUSD) as? Double ?? 0
+        googleAPIMonthlyBudgetUSD = storedMonthlyBudget.isFinite ? max(0, storedMonthlyBudget) : 0
+        googleAPIDefaultDirectory = defaults.string(forKey: Keys.googleAPIDefaultDirectory) ?? ""
+        googleAPIDefaultModel = defaults.string(forKey: Keys.googleAPIDefaultModel) ?? ""
+        googleAPIYoloEnabled = defaults.object(forKey: Keys.googleAPIYoloEnabled) as? Bool ?? true
+        googleAPIHotKeyEnabled = defaults.object(forKey: Keys.googleAPIHotKeyEnabled) as? Bool ?? true
+        let ghpRaw = defaults.string(forKey: Keys.googleAPIHotKeyPreset) ?? GoogleAPIQuickHotKeyPreset.ctrlOptG.rawValue
+        googleAPIHotKeyPreset = GoogleAPIQuickHotKeyPreset(rawValue: ghpRaw) ?? .ctrlOptG
+        let aamRaw = defaults.string(forKey: Keys.appAppearanceMode) ?? AppAppearanceMode.dark.rawValue
+        appAppearanceMode = AppAppearanceMode(rawValue: aamRaw) ?? .dark
         Self.mergeServiceSwitches(providers: &providerDisplaySettings, usage: &usageServiceVisibility)
         saveProviderDisplaySettings()
         saveServiceOrder()
@@ -942,5 +1014,15 @@ final class SettingsStore {
         static let floatingFrameH = "ccbar.settings.floatingFrame.h"
         static let commandCodeCredentialPreference = "ccbar.settings.commandCodeCredentialPreference"
         static let opencodeGoCredentialPreference = "ccbar.settings.opencodeGoCredentialPreference"
+        static let appAppearanceMode = "ccbar.custom.appAppearanceMode"
+        static let googleAPICredentialPreference = "ccbar.custom.googleAPICredentialPreference"
+        static let googleAPIMode = "ccbar.custom.googleAPIMode"
+        static let googleAPIDailyBudgetUSD = "ccbar.custom.googleAPIDailyBudgetUSD"
+        static let googleAPIMonthlyBudgetUSD = "ccbar.custom.googleAPIMonthlyBudgetUSD"
+        static let googleAPIDefaultDirectory = "ccbar.custom.googleAPIDefaultDirectory"
+        static let googleAPIDefaultModel = "ccbar.custom.googleAPIDefaultModel"
+        static let googleAPIYoloEnabled = "ccbar.custom.googleAPIYoloEnabled"
+        static let googleAPIHotKeyEnabled = "ccbar.custom.googleAPIHotKeyEnabled"
+        static let googleAPIHotKeyPreset = "ccbar.custom.googleAPIHotKeyPreset"
     }
 }

@@ -231,6 +231,10 @@ final class AppUpdater: NSObject, SPUUserDriver, SPUUpdaterDelegate, NSWindowDel
         window?.close()
     }
 
+    func applyAppearance(_ mode: AppAppearanceMode) {
+        window?.appearance = mode.nsAppearance
+    }
+
     private func showWindow() {
         if window == nil {
             let window = NSWindow(
@@ -246,6 +250,7 @@ final class AppUpdater: NSObject, SPUUserDriver, SPUUpdaterDelegate, NSWindowDel
             window.center()
             self.window = window
         }
+        window?.appearance = SettingsStore.shared.appAppearanceMode.nsAppearance
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
     }

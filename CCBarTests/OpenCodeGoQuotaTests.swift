@@ -25,7 +25,7 @@ final class OpenCodeGoQuotaTests: XCTestCase {
         XCTAssertEqual(desc?.supportsFloatingHUD, true)
 
         let order = QuotaProviderDescriptor.allProviders.map(\.app)
-        XCTAssertEqual(order.last, .opencodeGo)
+        XCTAssertTrue(order.contains(.opencodeGo))
         XCTAssertEqual(order.firstIndex(of: .opencodeGo), order.firstIndex(of: .commandCode).map { $0 + 1 })
     }
 

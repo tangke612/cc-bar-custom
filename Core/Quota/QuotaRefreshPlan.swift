@@ -10,6 +10,7 @@ struct QuotaRefreshPlan: Equatable, Sendable {
     var refreshCursor: Bool
     var refreshCommandCode: Bool
     var refreshOpenCodeGo: Bool
+    var refreshGoogleAPI: Bool
     /// 有可见导入 Codex 账号时需要调度导入刷新（是否真正刷新仍按各账号
     /// 自身 `visibleInPopover` 过滤；此处只表达"存在可见项"）。
     var refreshImported: Bool
@@ -25,6 +26,7 @@ struct QuotaRefreshPlan: Equatable, Sendable {
         showCursor: Bool,
         showCommandCode: Bool = false,
         showOpenCodeGo: Bool = false,
+        showGoogleAPI: Bool = false,
         hasVisibleImported: Bool
     ) -> QuotaRefreshPlan {
         QuotaRefreshPlan(
@@ -34,6 +36,7 @@ struct QuotaRefreshPlan: Equatable, Sendable {
             refreshCursor: showCursor,
             refreshCommandCode: showCommandCode,
             refreshOpenCodeGo: showOpenCodeGo,
+            refreshGoogleAPI: showGoogleAPI,
             refreshImported: hasVisibleImported,
             canMirrorPrimary: showCodex
         )
@@ -81,7 +84,7 @@ nonisolated enum QuotaRefreshPolicy {
         switch app {
         // agy CLI 取数较重，定时刷新至少隔 2 分钟。
         case .antigravity: return 120
-        case .codex, .claude, .cursor, .commandCode, .opencodeGo: return defaultMinSuccessInterval
+        case .codex, .claude, .cursor, .commandCode, .opencodeGo, .googleAPI: return defaultMinSuccessInterval
         }
     }
 
@@ -89,7 +92,7 @@ nonisolated enum QuotaRefreshPolicy {
     static func clearsBackoffOnSuccess(_ app: QuotaApp, source: QuotaSnapshotSource) -> Bool {
         switch app {
         case .claude: return source == .api
-        case .codex, .antigravity, .cursor, .commandCode, .opencodeGo: return true
+        case .codex, .antigravity, .cursor, .commandCode, .opencodeGo, .googleAPI: return true
         }
     }
 }

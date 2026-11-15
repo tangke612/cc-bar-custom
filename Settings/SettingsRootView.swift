@@ -56,6 +56,7 @@ struct SettingsRootView: View {
     @State private var showCodexResetCreditsSheet = false
     @State private var showCommandCodeSheet = false
     @State private var showOpenCodeGoSheet = false
+    @State private var showGoogleAPISheet = false
     @State private var isExportingDiagnostics = false
     @State private var diagnosticsMessage: String?
     @State private var diagnosticsMessageIsError = false
@@ -75,9 +76,15 @@ struct SettingsRootView: View {
         }
         .sheet(isPresented: $showCommandCodeSheet) {
             CommandCodeCredentialSheet()
+                .ccPreferredAppearance()
         }
         .sheet(isPresented: $showOpenCodeGoSheet) {
             OpenCodeGoCredentialSheet()
+                .ccPreferredAppearance()
+        }
+        .sheet(isPresented: $showGoogleAPISheet) {
+            GoogleAPICredentialSheet()
+                .ccPreferredAppearance()
         }
         .confirmationDialog(
             tr("Export diagnostics?", "导出诊断日志？"),
@@ -95,6 +102,7 @@ struct SettingsRootView: View {
                 privacyAccountKey: "primary:codex",
                 fetchCredits: { await appState.fetchCodexResetCredits() }
             )
+            .ccPreferredAppearance()
         }
         .confirmationDialog(
             tr("Rebuild alert history?", "重建提醒记录？"),
@@ -118,6 +126,15 @@ struct SettingsRootView: View {
             } else {
                 launchAtLoginMessage = nil
             }
+            if appState.shouldPresentGoogleAPISheet {
+                appState.shouldPresentGoogleAPISheet = false
+                showGoogleAPISheet = true
+            }
+        }
+        .onChange(of: appState.shouldPresentGoogleAPISheet) { _, newValue in
+            guard newValue else { return }
+            appState.shouldPresentGoogleAPISheet = false
+            showGoogleAPISheet = true
         }
     }
 
@@ -306,6 +323,30 @@ struct SettingsRootView: View {
     @ViewBuilder
     private func appearanceSection(settings: SettingsStore) -> some View {
         PrefsGroup(
+            title: "Theme",
+            chinese: "主题外观"
+        ) {
+            PrefsRow(
+                label: "Appearance",
+                chinese: "界面外观",
+                desc: "Applies to the hover panel, floating HUD, and main window while keeping the menu bar icon matched to macOS.",
+                chineseDesc: "作用于悬停面板、桌面悬浮窗与主窗口，菜单栏图标仍自动适配系统顶栏"
+            ) {
+                Picker("", selection: Binding(
+                    get: { settings.appAppearanceMode },
+                    set: { settings.appAppearanceMode = $0 }
+                )) {
+                    ForEach(AppAppearanceMode.allCases) { mode in
+                        Text(tr(mode.englishTitle, mode.chineseTitle)).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .fixedSize()
+            }
+        }
+
+        PrefsGroup(
             title: "Menu Bar",
             chinese: "菜单栏"
         ) {
@@ -453,6 +494,41 @@ struct SettingsRootView: View {
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .tint(.green)
+            }
+            InsetDivider()
+            PrefsRow(
+                label: "Gemini CLI quick launch",
+                chinese: "Google API 快速启动快捷键",
+                desc: "Launch Gemini CLI with your Google API key in terminal from anywhere.",
+                chineseDesc: "在任意位置按下快捷键打开终端并用 Google API Key 启动 gemini"
+            ) {
+                HStack(spacing: 8) {
+                    Picker("", selection: Binding(
+                        get: { settings.googleAPIHotKeyPreset },
+                        set: { settings.googleAPIHotKeyPreset = $0 }
+                    )) {
+                        ForEach(GoogleAPIQuickHotKeyPreset.allCases) { preset in
+                            Text(preset.symbol).tag(preset)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .fixedSize()
+                    .disabled(!settings.googleAPIHotKeyEnabled)
+
+                    Button(tr("Configure…", "配置…")) {
+                        showGoogleAPISheet = true
+                    }
+                    .controlSize(.small)
+
+                    Toggle("", isOn: Binding(
+                        get: { settings.googleAPIHotKeyEnabled },
+                        set: { settings.googleAPIHotKeyEnabled = $0 }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .tint(.green)
+                }
             }
             InsetDivider()
             PrefsRow(
@@ -1183,9 +1259,14 @@ struct SettingsRootView: View {
                 if let usageApp = app.usageApp, usageApp != .cursor {
                     Task { await appState.usageService.localUsageSettingsDidChange(app: usageApp, enabled: newValue) }
                 }
-                // Antigravity / Cursor / Command Code / OpenCode Go 开启后立即取一次额度，不等下一轮调度。
-                guard newValue, [QuotaApp.antigravity, .cursor, .commandCode, .opencodeGo].contains(app) else { return }
-                Task { await appState.refreshQuotas(reason: .userInitiated) }
+                // Antigravity / Cursor / Command Code / OpenCode Go / Google API 开启后立即取一次额度，不等下一轮调度。
+                guard newValue, [QuotaApp.antigravity, .cursor, .commandCode, .opencodeGo, .googleAPI].contains(app) else { return }
+                Task {
+                    if app == .googleAPI {
+                        await appState.loadGoogleAPI()
+                    }
+                    await appState.refreshQuotas(reason: .userInitiated)
+                }
             }
         )
     }
@@ -1253,6 +1334,8 @@ struct SettingsRootView: View {
         case .opencodeGo:
             // Go 没有可读的账号信息，检测到 key 即视为已登录，副标题显示「已登录」。
             return (email: nil, plan: nil, signedIn: appState.opencodeGoAccount != nil)
+        case .googleAPI:
+            return (email: nil, plan: appState.googleAPIAccount?.planLabel, signedIn: appState.googleAPIAccount != nil)
         }
     }
 
@@ -1362,6 +1445,12 @@ struct SettingsRootView: View {
                 "用量：使用 OpenCode Go 模型的对话计入 OpenCode 或 Pi 的统计。"
             ))
             isDetected = info.signedIn
+        case .googleAPI:
+            sourceLines.append(tr(
+                "Usage: reads ~/.gemini/tmp Gemini CLI conversation logs to calculate cost; shows remaining % when Daily/Monthly budget is set.",
+                "用量：读取 ~/.gemini/tmp 中 Gemini CLI 的对话记录计算费用；设置日/月预算后展示剩余百分比。"
+            ))
+            isDetected = info.signedIn
         }
         if let offHint = offHint(for: app), !settings.isProviderEnabled(app) {
             sourceLines.append(offHint)
@@ -1407,6 +1496,9 @@ struct SettingsRootView: View {
         if app == .opencodeGo {
             actions.append(ServiceAction(title: tr("Enter Credentials…", "填写凭据…")) { showOpenCodeGoSheet = true })
         }
+        if app == .googleAPI {
+            actions.append(ServiceAction(title: tr("Configure & Quick Launch…", "凭据与快速启动…")) { showGoogleAPISheet = true })
+        }
         if claudeDesktopDenied, info.signedIn {
             actions.append(authorizeClaudeDesktop)
         }
@@ -1423,6 +1515,8 @@ struct SettingsRootView: View {
             connectAction = ServiceAction(title: tr("Enter Credentials…", "填写凭据…")) { showCommandCodeSheet = true }
         } else if !isDetected, app == .opencodeGo {
             connectAction = ServiceAction(title: tr("Enter Credentials…", "填写凭据…")) { showOpenCodeGoSheet = true }
+        } else if !isDetected, app == .googleAPI {
+            connectAction = ServiceAction(title: tr("Configure & Quick Launch…", "凭据与快速启动…")) { showGoogleAPISheet = true }
         } else {
             connectAction = nil
         }
@@ -1521,6 +1615,9 @@ struct SettingsRootView: View {
         case .opencodeGo:
             tr("Quota: reads the OpenCode Go API key from OpenCode, Pi, the OPENCODE_API_KEY environment variable, or the one you entered (stored in Keychain), and asks OpenCode for remaining quota.",
                "额度：读取 OpenCode、Pi 中的 OpenCode Go API Key、环境变量 OPENCODE_API_KEY 或手动填写的 Key（保存在钥匙串），向 OpenCode 查询剩余额度。")
+        case .googleAPI:
+            tr("Quota & Quick Launch: validates AI Studio (AIza…) or Vertex Express (AQ.…) API keys via zero-cost Google API endpoints, tracks local Gemini CLI spending against optional budgets, and injects keys via a 0600 env file.",
+               "额度与快速启动：通过零计费官方接口校验 AI Studio（AIza…）或 Vertex Express（AQ.…）API Key，按本机 Gemini CLI 记录跟踪日/月预算，并通过 0600 权限环境文件快速启动。")
         }
     }
 
@@ -1539,6 +1636,8 @@ struct SettingsRootView: View {
             tr("Sign in with the Command Code CLI to detect it, or", "登录 Command Code CLI 后自动识别，或")
         case .opencodeGo:
             tr("Connect OpenCode Go in OpenCode or Pi to detect it, or", "在 OpenCode 或 Pi 中连接 OpenCode Go 后自动识别，或")
+        case .googleAPI:
+            tr("Add a key in ~/.gemini/.env / environment, or", "在 ~/.gemini/.env 或环境变量配置 Key，或")
         }
     }
 
@@ -1552,6 +1651,9 @@ struct SettingsRootView: View {
             tr("Turning on fetches Command Code quota online.", "开启后会联网查询 Command Code 额度。")
         case .opencodeGo:
             tr("Turning on fetches OpenCode Go quota online.", "开启后会联网查询 OpenCode Go 额度。")
+        case .googleAPI:
+            tr("Turning on validates your Google API key online and tracks local Gemini CLI usage.",
+               "开启后会联网校验 Google API Key 有效性并监测本机 Gemini CLI 用量。")
         default:
             nil
         }

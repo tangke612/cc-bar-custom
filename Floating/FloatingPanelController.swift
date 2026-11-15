@@ -23,6 +23,10 @@ final class FloatingPanelController: NSObject {
         self.appState = appState
     }
 
+    func applyAppearance(_ mode: AppAppearanceMode) {
+        panel?.appearance = mode.nsAppearance
+    }
+
     /// 根据当前设置同步显示 / 隐藏 / 行刷新
     func sync() {
         let settings = SettingsStore.shared
@@ -106,6 +110,7 @@ final class FloatingPanelController: NSObject {
 
         let initialFrame = settings.floatingPanelFrame ?? Self.defaultFrame()
         let panel = FloatingPanel(contentRect: initialFrame)
+        panel.appearance = settings.appAppearanceMode.nsAppearance
         panel.contentView = hosting
         // 让窗口尺寸跟随 SwiftUI 内容收缩
         hosting.frame = panel.contentView?.bounds ?? .zero

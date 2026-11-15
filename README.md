@@ -4,6 +4,8 @@
 > - **悬停查看额度**：鼠标停在菜单栏图标上即弹出面板，移开自动收起，全程不抢终端键盘焦点；图钉固定、⌃⌥K 全局快捷键
 > - **本地历史会话检索**：只读索引 Codex、Antigravity（CLI / 桌面端）、Claude Code 会话，还原真实工作目录，支持项目 / 提问 / 分支 / 拼音检索
 > - **一键复制恢复命令**：生成 `cd '<目录>' && codex resume <id>` / `agy --conversation <id>` / `claude --resume <id>`，可继承原会话的权限（含 YOLO）；右键可直接在终端恢复、在 Finder 或编辑器中打开项目
+> - **Google API 与 Gemini CLI 快速启动**：支持 Google AI Studio（`AIza...`）与 Vertex AI Express（`AQ...`）密钥验证与 Keychain 存储，本地增量统计 Gemini CLI 用量并支持日/月预算上限、悬停卡片「启动 / 复制」按钮与全局快捷键（默认 `⌃⌥G`）一键开启 YOLO / 模型会话
+> - **护眼深色模式**：默认启用深色界面并叠加防透光压底（白网页背后也不刺眼），悬停面板右上角一键切换深/浅色，设置「外观与显示」可选深色 / 浅色 / 跟随系统；菜单栏顶栏图标仍自动适配 macOS 顶栏明暗
 >
 > **安装（仅 Apple 芯片 Mac）**：从本仓库 [Releases](https://github.com/tangke612/cc-bar-custom/releases/latest) 下载 `CCBar.dmg`，拖入「应用程序」。安装包为本地 ad-hoc 签名、未经公证，首次打开前在终端执行一次 `xattr -cr /Applications/CCBar.app`。定制版已关闭应用内更新，避免被原项目新版本覆盖；原项目的介绍见下文。
 
@@ -76,6 +78,7 @@ cc-bar 展示两类数据：**订阅额度**通过各服务官方接口获取剩
 | **Cursor** | Total / Auto / API（含 Unlimited） | 支持 | 账号全设备远端计量（今日 / 本期） | — | 本地 state.vscdb（严格只读） |
 | **Command Code** | 5 小时 / 周额度、GOAT 月度 Credits | 支持 | — | — | 本地 5 级只读探测 / Keychain Key |
 | **OpenCode Go** | 5 小时 / 周 / 月额度 | 支持 | — | — | OpenCode / Pi 本地只读探测 / Keychain Key |
+| **Google API** | 日 / 月预算余量（0 为无上限）与本地累计费用 | 支持 | 本地 Gemini CLI 会话增量统计 | — | 自动读取 `~/.gemini/.env` 或 Keychain Key，零计费在线校验（AI Studio / Vertex Express），支持 `⌃⌥G` 快速启动 |
 | **Pi / OpenCode / DSH** | — | — | 本地会话日志（Pi / OpenCode / DSH 多帧 zstd） | — | 严格只读本地日志与数据库 |
 
 ---

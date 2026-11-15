@@ -188,6 +188,20 @@ enum MenuBarQuotaSelection {
         if snapshot.app == .cursor {
             return [snapshot.primaryLimit].compactMap { $0 }
         }
+        if snapshot.app == .googleAPI {
+            switch choice {
+            case .primary:
+                return [snapshot.primaryLimit].compactMap { $0 }
+            case .weekly:
+                return [snapshot.secondaryLimit ?? snapshot.primaryLimit].compactMap { $0 }
+            case .both:
+                return [snapshot.primaryLimit, snapshot.secondaryLimit]
+                    .compactMap { $0 }
+                    .reduce(into: [QuotaLimit]()) { result, limit in
+                        if !result.contains(where: { $0.id == limit.id }) { result.append(limit) }
+                    }
+            }
+        }
         switch choice {
         case .primary:
             return [snapshot.primaryLimit].compactMap { $0 }

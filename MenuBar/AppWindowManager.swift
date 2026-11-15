@@ -15,12 +15,21 @@ final class AppWindowManager {
         self.appState = appState
     }
 
+    func applyAppearance(_ mode: AppAppearanceMode) {
+        let appearance = mode.nsAppearance
+        mainWindow?.appearance = appearance
+        mainWindow?.sheets.forEach { $0.appearance = appearance }
+        onboardingWindow?.appearance = appearance
+        onboardingWindow?.sheets.forEach { $0.appearance = appearance }
+    }
+
     func openMainWindow(tab: MainTab) {
         guard let appState else { return }
         appState.mainTab = tab
         NSApp.setActivationPolicy(.regular)
 
         if let existing = mainWindow {
+            existing.appearance = SettingsStore.shared.appAppearanceMode.nsAppearance
             NSApp.activate(ignoringOtherApps: true)
             existing.makeKeyAndOrderFront(nil)
             return
@@ -64,6 +73,7 @@ final class AppWindowManager {
         }
 
         mainWindow = window
+        window.appearance = SettingsStore.shared.appAppearanceMode.nsAppearance
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
     }
@@ -73,6 +83,7 @@ final class AppWindowManager {
         NSApp.setActivationPolicy(.regular)
 
         if let existing = onboardingWindow {
+            existing.appearance = SettingsStore.shared.appAppearanceMode.nsAppearance
             NSApp.activate(ignoringOtherApps: true)
             existing.makeKeyAndOrderFront(nil)
             return
@@ -112,6 +123,7 @@ final class AppWindowManager {
         }
 
         onboardingWindow = window
+        window.appearance = SettingsStore.shared.appAppearanceMode.nsAppearance
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
     }

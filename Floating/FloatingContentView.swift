@@ -9,7 +9,16 @@ import SwiftUI
 
 struct FloatingContentView: View {
     @Environment(AppState.self) private var appState
+    @Environment(\.colorScheme) private var colorScheme
     let settings: SettingsStore
+
+    private var isDarkMode: Bool {
+        switch settings.appAppearanceMode {
+        case .dark: return true
+        case .light: return false
+        case .system: return colorScheme == .dark
+        }
+    }
 
     var body: some View {
         let providers = settings.orderedFloatingProviders.filter {
@@ -38,10 +47,13 @@ struct FloatingContentView: View {
             // 三层叠加,解决 `.hudWindow` 在彩色桌面下前景被吃掉的问题:
             // 1) 实色窗背景压一层,使桌面像素不再直接透上来
             // 2) `.popover` material 接管毛玻璃质感(比 .hudWindow 厚)
-            // 3) hairline 描边,任何背景下都能勾出 HUD 边缘
+            // 3) 深色模式追加压暗层 + hairline 描边，避免纯白背景透亮晃眼
             ZStack {
-                Color(nsColor: .windowBackgroundColor).opacity(0.55)
+                Color(nsColor: .windowBackgroundColor).opacity(isDarkMode ? 0.72 : 0.55)
                 VisualEffectBackground(material: .popover, blendingMode: .behindWindow)
+                if isDarkMode {
+                    Color(red: 22 / 255, green: 22 / 255, blue: 26 / 255).opacity(0.38)
+                }
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -49,6 +61,7 @@ struct FloatingContentView: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
         )
+        .ccPreferredAppearance()
         // 阴影交给 NSPanel 的 hasShadow,它按内容 alpha 自动取圆角形状,
         // SwiftUI 这层 shadow 会被 panel 边界裁掉而且和系统阴影叠加,所以移除。
         .fixedSize()

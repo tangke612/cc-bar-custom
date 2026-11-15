@@ -185,6 +185,14 @@ final class QuotaAlertTests: XCTestCase {
                 snapshot = CommandCodeQuotaClient.parse(creditsRoot: ["fiveHour": ["cap": 100, "used": 95], "weekly": ["cap": 100, "used": 95], "monthlyCredits": 1], subscriptionsRoot: ["data": ["planId": "goat"]], fetchedAt: h.date).snapshot
             case .opencodeGo:
                 snapshot = OpenCodeGoQuotaClient.parse(root: ["usage": ["rolling": ["status": "ok", "percent": 95], "weekly": ["status": "ok", "percent": 95], "monthly": ["status": "ok", "percent": 95]]], fetchedAt: h.date)!
+            case .googleAPI:
+                snapshot = GoogleAPIQuotaClient.makeSnapshot(
+                    mode: .aiStudio,
+                    usage: GoogleAPIUsageSummary(todayCostUSD: 9.5, monthCostUSD: 95),
+                    dailyBudgetUSD: 10,
+                    monthlyBudgetUSD: 100,
+                    now: h.date
+                )
             }
             var raw = snapshot
             raw.fetchedAt = h.date
@@ -193,7 +201,7 @@ final class QuotaAlertTests: XCTestCase {
             h.service.enqueue(h.observation(snapshot: raw))
         }
         await h.service.waitUntilIdle()
-        XCTAssertEqual(h.client.messages.count, 6)
+        XCTAssertEqual(h.client.messages.count, QuotaApp.allCases.count)
         XCTAssertEqual(Set(h.client.messages.map(\.title)), Set(QuotaProviderDescriptor.allProviders.map { "\($0.title) quota is low" }))
         let payload = try await h.store.load(initialized: true)
         XCTAssertEqual(Set(payload.accounts.values.map { $0.identity.app }), Set(QuotaApp.allCases))
@@ -201,7 +209,7 @@ final class QuotaAlertTests: XCTestCase {
         let cursor = CursorQuotaClient.parse(root: ["individualUsage": ["plan": ["totalPercentUsed": 99]]], fetchedAt: h.date)
         h.service.enqueue(h.observation(snapshot: cursor))
         await h.service.waitUntilIdle()
-        XCTAssertEqual(h.client.messages.count, 6)
+        XCTAssertEqual(h.client.messages.count, QuotaApp.allCases.count)
     }
 
     @MainActor func testClaudeModelWeeklyAndInactiveWindowsAreIndependent() async throws {
