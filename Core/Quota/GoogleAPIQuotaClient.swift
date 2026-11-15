@@ -277,11 +277,14 @@ actor GoogleAPILocalUsage {
 
 /// Google 官方 API（AI Studio & Vertex AI Express）：
 /// - AI Studio：`GET https://generativelanguage.googleapis.com/v1beta/models?pageSize=20`（零计费探测 Key 有效性）
-/// - Vertex AI Express：`POST https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-flash:countTokens`（零计费探测 Key 有效性）
+/// - Vertex AI Express：`POST https://aiplatform.googleapis.com/v1beta1/publishers/google/models/gemini-3-flash-preview:countTokens`（若模型 404 再降级探测 `gemini-2.5-flash`）
 /// - 用量与预算进度：结合 `GoogleAPILocalUsage` 计算当日 / 本周 / 本月消费与日/月预算剩余百分比。
 nonisolated enum GoogleAPIQuotaClient {
+    typealias DataLoader = @Sendable (URLRequest) async throws -> (Data, URLResponse)
+
     private static let aiStudioModelsURL = URL(string: "https://generativelanguage.googleapis.com/v1beta/models?pageSize=20")!
-    private static let vertexExpressCountTokensURL = URL(string: "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-flash:countTokens")!
+    private static let vertexExpressV1Beta1CountTokensURL = URL(string: "https://aiplatform.googleapis.com/v1beta1/publishers/google/models/gemini-3-flash-preview:countTokens")!
+    private static let vertexExpressLegacyV1CountTokensURL = URL(string: "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-flash:countTokens")!
 
     static func fetch(
         session: GoogleAPIAuthSession,
@@ -289,52 +292,100 @@ nonisolated enum GoogleAPIQuotaClient {
         monthlyBudgetUSD: Double,
         geminiRoot: URL = GoogleAPILocalUsage.defaultGeminiRoot(),
         urlSession: URLSession? = nil,
+        dataLoader: DataLoader? = nil,
         now: Date = Date()
-    ) async -> Result<(snapshot: QuotaSnapshot, usage: GoogleAPIUsageSummary), QuotaError> {
-        let validation = await validateKey(session: session, urlSession: urlSession)
-        if case .failure(let error) = validation {
-            return .failure(error)
+    ) async -> Result<(snapshot: QuotaSnapshot, usage: GoogleAPIUsageSummary, resolvedMode: GoogleAPIMode.ResolvedMode), QuotaError> {
+        let validation = await validateKey(session: session, urlSession: urlSession, dataLoader: dataLoader)
+        guard case .success(let actualMode) = validation else {
+            if case .failure(let error) = validation {
+                return .failure(error)
+            }
+            return .failure(.transport("unexpected validation state"))
         }
 
         let usage = await GoogleAPILocalUsage.shared.scan(geminiRoot: geminiRoot, now: now)
         let snapshot = makeSnapshot(
-            mode: session.resolvedMode,
+            mode: actualMode,
             usage: usage,
             dailyBudgetUSD: dailyBudgetUSD,
             monthlyBudgetUSD: monthlyBudgetUSD,
             now: now
         )
-        return .success((snapshot, usage))
+        return .success((snapshot, usage, actualMode))
     }
 
     static func validateKey(
         session: GoogleAPIAuthSession,
-        urlSession: URLSession? = nil
+        urlSession: URLSession? = nil,
+        dataLoader: DataLoader? = nil
+    ) async -> Result<GoogleAPIMode.ResolvedMode, QuotaError> {
+        let loader: DataLoader = dataLoader ?? { request in
+            try await NetworkProxy.data(for: request, session: urlSession)
+        }
+
+        let primary = await probeEndpoint(mode: session.resolvedMode, apiKey: session.apiKey, loader: loader)
+        if case .success = primary {
+            return .success(session.resolvedMode)
+        }
+
+        guard case .failure(let primaryError) = primary else {
+            return .success(session.resolvedMode)
+        }
+
+        if session.configuredMode == .auto,
+           let status = primaryError.httpStatusCode,
+           [400, 401, 403, 404].contains(status),
+           !primaryError.looksLikeInterceptedResponse {
+            let alternate: GoogleAPIMode.ResolvedMode = (session.resolvedMode == .vertexExpress) ? .aiStudio : .vertexExpress
+            if case .success = await probeEndpoint(mode: alternate, apiKey: session.apiKey, loader: loader) {
+                return .success(alternate)
+            }
+        }
+
+        return .failure(primaryError)
+    }
+
+    private static func probeEndpoint(
+        mode: GoogleAPIMode.ResolvedMode,
+        apiKey: String,
+        loader: DataLoader
     ) async -> Result<Void, QuotaError> {
-        let request: URLRequest
-        switch session.resolvedMode {
+        switch mode {
         case .aiStudio:
             var req = URLRequest(url: aiStudioModelsURL)
             req.httpMethod = "GET"
-            req.setValue(session.apiKey, forHTTPHeaderField: "x-goog-api-key")
+            req.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
             req.setValue("application/json", forHTTPHeaderField: "Accept")
             req.setValue("cc-bar", forHTTPHeaderField: "User-Agent")
             req.timeoutInterval = 10
-            request = req
-        case .vertexExpress:
-            var req = URLRequest(url: vertexExpressCountTokensURL)
-            req.httpMethod = "POST"
-            req.setValue(session.apiKey, forHTTPHeaderField: "x-goog-api-key")
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req.setValue("application/json", forHTTPHeaderField: "Accept")
-            req.setValue("cc-bar", forHTTPHeaderField: "User-Agent")
-            req.httpBody = Data(#"{"contents":[{"role":"user","parts":[{"text":"ping"}]}]}"#.utf8)
-            req.timeoutInterval = 10
-            request = req
-        }
+            return await executeProbe(req, loader: loader)
 
+        case .vertexExpress:
+            let primaryReq = makeVertexCountTokensRequest(url: vertexExpressV1Beta1CountTokensURL, apiKey: apiKey)
+            let primaryResult = await executeProbe(primaryReq, loader: loader)
+            if case .failure(let err) = primaryResult, err.httpStatusCode == 404 {
+                let fallbackReq = makeVertexCountTokensRequest(url: vertexExpressLegacyV1CountTokensURL, apiKey: apiKey)
+                return await executeProbe(fallbackReq, loader: loader)
+            }
+            return primaryResult
+        }
+    }
+
+    private static func makeVertexCountTokensRequest(url: URL, apiKey: String) -> URLRequest {
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("cc-bar", forHTTPHeaderField: "User-Agent")
+        req.httpBody = Data(#"{"contents":[{"role":"user","parts":[{"text":"ping"}]}]}"#.utf8)
+        req.timeoutInterval = 10
+        return req
+    }
+
+    private static func executeProbe(_ request: URLRequest, loader: DataLoader) async -> Result<Void, QuotaError> {
         do {
-            let (body, response) = try await NetworkProxy.data(for: request, session: urlSession)
+            let (body, response) = try await loader(request)
             guard let http = response as? HTTPURLResponse else {
                 return .failure(.transport("non-http response"))
             }
@@ -349,6 +400,14 @@ nonisolated enum GoogleAPIQuotaClient {
         } catch {
             return .failure(.from(transport: error))
         }
+    }
+
+    static func isServiceBlockedError(_ error: QuotaError) -> Bool {
+        guard case .http(let code, let body) = error, code == 403 else { return false }
+        let upper = body.uppercased()
+        return upper.contains("API_KEY_SERVICE_BLOCKED")
+            || upper.contains("SERVICE_DISABLED")
+            || upper.contains("HAS NOT BEEN USED IN PROJECT")
     }
 
     static func makeSnapshot(
@@ -431,6 +490,5 @@ nonisolated enum GoogleAPIQuotaClient {
         let upper = body.uppercased()
         return upper.contains("API_KEY_INVALID")
             || upper.contains("API KEY NOT VALID")
-            || upper.contains("API_KEY_SERVICE_BLOCKED")
     }
 }

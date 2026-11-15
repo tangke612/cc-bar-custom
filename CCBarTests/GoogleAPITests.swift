@@ -91,6 +91,8 @@ final class GoogleAPITests: XCTestCase {
         XCTAssertTrue(vertexContents.contains("export GOOGLE_GENAI_USE_VERTEXAI='true'"))
         XCTAssertTrue(vertexContents.contains("export GOOGLE_API_KEY='\(vertexKey)'"))
         XCTAssertTrue(vertexContents.contains("unset GEMINI_API_KEY"))
+        XCTAssertTrue(vertexContents.contains("unset GOOGLE_CLOUD_PROJECT"))
+        XCTAssertTrue(vertexContents.contains("unset GOOGLE_CLOUD_LOCATION"))
 
         let command = GoogleAPIAuth.buildQuickLaunchCommand(
             envFileURL: envFile,
@@ -212,5 +214,105 @@ final class GoogleAPITests: XCTestCase {
         XCTAssertNil(AppAppearanceMode.system.preferredColorScheme)
         XCTAssertEqual(AppAppearanceMode.light.preferredColorScheme, ColorScheme.light)
         XCTAssertEqual(AppAppearanceMode.dark.preferredColorScheme, ColorScheme.dark)
+    }
+
+    // MARK: - 在线探测自动降级与模式缓存
+
+    func testAutoModeFallsBackFromBlockedVertexToAIStudioForAQKey() async throws {
+        let aqKey = "AQ." + "Ab8RN6Fallback" + "TestKey_1234567890"
+        let session = GoogleAPIAuthSession(
+            apiKey: aqKey,
+            source: .manualKeychain,
+            resolvedMode: .vertexExpress,
+            configuredMode: .auto
+        )
+
+        let loader: GoogleAPIQuotaClient.DataLoader = { request in
+            let url = try XCTUnwrap(request.url)
+            if url.host == "aiplatform.googleapis.com" {
+                let body = Data(#"{"error":{"code":403,"status":"PERMISSION_DENIED","details":[{"reason":"API_KEY_SERVICE_BLOCKED"}]}}"#.utf8)
+                let response = HTTPURLResponse(url: url, statusCode: 403, httpVersion: nil, headerFields: nil)!
+                return (body, response)
+            }
+            if url.host == "generativelanguage.googleapis.com" {
+                let body = Data(#"{"models":[]}"#.utf8)
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (body, response)
+            }
+            XCTFail("Unexpected host: \(url)")
+            throw URLError(.badURL)
+        }
+
+        let result = await GoogleAPIQuotaClient.fetch(
+            session: session,
+            dailyBudgetUSD: 0,
+            monthlyBudgetUSD: 0,
+            geminiRoot: tempHome,
+            dataLoader: loader
+        )
+
+        switch result {
+        case .success(let fetched):
+            XCTAssertEqual(fetched.resolvedMode, .aiStudio)
+            XCTAssertEqual(fetched.snapshot.planType, "AI Studio")
+        case .failure(let error):
+            XCTFail("Expected fallback to AI Studio, got failure: \(error)")
+        }
+    }
+
+    func testExplicitVertexModeDoesNotFallbackAndDetectsServiceBlocked() async throws {
+        let aqKey = "AQ." + "Ab8RN6Explicit" + "VertexKey_123456789"
+        let session = GoogleAPIAuthSession(
+            apiKey: aqKey,
+            source: .manualKeychain,
+            resolvedMode: .vertexExpress,
+            configuredMode: .vertexExpress
+        )
+
+        let loader: GoogleAPIQuotaClient.DataLoader = { request in
+            let url = try XCTUnwrap(request.url)
+            if url.host == "aiplatform.googleapis.com" {
+                let body = Data(#"{"error":{"code":403,"status":"PERMISSION_DENIED","details":[{"reason":"API_KEY_SERVICE_BLOCKED"}]}}"#.utf8)
+                let response = HTTPURLResponse(url: url, statusCode: 403, httpVersion: nil, headerFields: nil)!
+                return (body, response)
+            }
+            XCTFail("Explicit vertex mode must not probe AI Studio: \(url)")
+            throw URLError(.badURL)
+        }
+
+        let result = await GoogleAPIQuotaClient.fetch(
+            session: session,
+            dailyBudgetUSD: 0,
+            monthlyBudgetUSD: 0,
+            geminiRoot: tempHome,
+            dataLoader: loader
+        )
+
+        switch result {
+        case .success:
+            XCTFail("Expected failure when explicit Vertex Express mode is blocked")
+        case .failure(let error):
+            XCTAssertTrue(GoogleAPIQuotaClient.isServiceBlockedError(error))
+        }
+    }
+
+    func testRememberAutoResolvedModePersistsOnlyKeyHash() {
+        let suiteName = "ccbar.tests.googleapi.mode.\(UUID().uuidString)"
+        let suite = UserDefaults(suiteName: suiteName)!
+        defer { suite.removePersistentDomain(forName: suiteName) }
+
+        let aqKey = "AQ." + "Ab8RN6CachedMode" + "TestKey_987654321"
+        GoogleAPIAuth.rememberAutoResolvedMode(.aiStudio, for: aqKey, defaults: suite)
+
+        let session = GoogleAPIAuth.load(
+            homeDirectory: tempHome,
+            environment: ["GOOGLE_API_KEY": aqKey],
+            preference: .automatic,
+            mode: .auto,
+            defaults: suite
+        )
+        XCTAssertEqual(session?.resolvedMode, .aiStudio)
+        XCTAssertEqual(session?.configuredMode, .auto)
+        XCTAssertFalse(suite.dictionaryRepresentation().description.contains(aqKey))
     }
 }

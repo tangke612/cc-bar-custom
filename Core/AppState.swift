@@ -2610,6 +2610,16 @@ final class AppState {
         return error.userMessage
     }
 
+    private func googleAPIAuthFailureMessage(_ error: QuotaError, mode: GoogleAPIMode.ResolvedMode) -> String {
+        if GoogleAPIQuotaClient.isServiceBlockedError(error) {
+            return tr(
+                "API service blocked for \(mode.displayLabel) — check Google Cloud API restrictions or switch endpoint mode",
+                "当前 Key 未开通 \(mode.displayLabel) 接口权限（请检查 GCP API 限制或切换接口类型）"
+            )
+        }
+        return error.userMessage
+    }
+
     private func loadGoogleAPIQuota(reason: QuotaRefreshReason) async {
         guard beginQuotaRefresh(.googleAPI, reason: reason) else { return }
         let alertEntryVersion = primaryQuotaAlertVersion(for: .googleAPI)
@@ -2624,7 +2634,21 @@ final class AppState {
         let dailyBudget = SettingsStore.shared.googleAPIDailyBudgetUSD
         let monthlyBudget = SettingsStore.shared.googleAPIMonthlyBudgetUSD
 
-        func apply(_ response: (snapshot: QuotaSnapshot, usage: GoogleAPIUsageSummary)) {
+        func apply(
+            _ response: (snapshot: QuotaSnapshot, usage: GoogleAPIUsageSummary, resolvedMode: GoogleAPIMode.ResolvedMode),
+            baseSession: GoogleAPIAuthSession
+        ) async {
+            if baseSession.configuredMode == .auto {
+                GoogleAPIAuth.rememberAutoResolvedMode(response.resolvedMode, for: baseSession.apiKey)
+            }
+            if response.resolvedMode != baseSession.resolvedMode {
+                var updated = baseSession
+                updated.resolvedMode = response.resolvedMode
+                googleAPIAccount = updated
+                await Task.detached(priority: .utility) {
+                    GoogleAPIAuth.syncLaunchEnvFile(session: updated)
+                }.value
+            }
             googleAPIUsageSummary = response.usage
             storeQuota(.googleAPI, snapshot: response.snapshot, source: .api)
             observePrimaryQuota(response.snapshot, settingsVersion: alertSettingsVersion)
@@ -2638,7 +2662,7 @@ final class AppState {
         guard primaryQuotaAlertVersion(for: .googleAPI) == alertEntryVersion else { return }
         switch result {
         case .success(let response):
-            apply(response)
+            await apply(response, baseSession: session)
         case .failure(let error):
             let reload = await reloadCredentialAfterRejection(
                 error,
@@ -2650,7 +2674,7 @@ final class AppState {
             switch reload {
             case .notRejected, .unchanged:
                 guard primaryQuotaAlertVersion(for: .googleAPI) == alertEntryVersion else { return }
-                markQuotaFailure(.googleAPI, error.userMessage, error: error)
+                markQuotaFailure(.googleAPI, googleAPIAuthFailureMessage(error, mode: session.resolvedMode), error: error)
             case .changed(let reloaded):
                 let retryEntryVersion = primaryQuotaAlertVersion(for: .googleAPI)
                 let retry = await GoogleAPIQuotaClient.fetch(
@@ -2661,9 +2685,9 @@ final class AppState {
                 guard primaryQuotaAlertVersion(for: .googleAPI) == retryEntryVersion else { return }
                 switch retry {
                 case .success(let response):
-                    apply(response)
+                    await apply(response, baseSession: reloaded)
                 case .failure(let retryError):
-                    markQuotaFailure(.googleAPI, retryError.userMessage, error: retryError)
+                    markQuotaFailure(.googleAPI, googleAPIAuthFailureMessage(retryError, mode: reloaded.resolvedMode), error: retryError)
                 }
             }
         }

@@ -172,7 +172,7 @@ struct GoogleAPICredentialSheet: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                     Picker("", selection: $mode) {
-                        Text(tr("Auto-detect (AIza… / AQ.…)", "自动识别（AIza… / AQ.…）")).tag(GoogleAPIMode.auto)
+                        Text(tr("Auto-detect (Online probe, recommended)", "自动识别（联网探测，推荐）")).tag(GoogleAPIMode.auto)
                         Text("Google AI Studio").tag(GoogleAPIMode.aiStudio)
                         Text("Vertex AI Express").tag(GoogleAPIMode.vertexExpress)
                     }
@@ -299,7 +299,7 @@ struct GoogleAPICredentialSheet: View {
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                         .frame(width: 72, alignment: .leading)
-                    TextField(tr("Optional (e.g. gemini-2.5-pro)", "留空按 CLI 默认（如 gemini-2.5-pro）"), text: $defaultModel)
+                    TextField(tr("Optional (e.g. gemini-3.1-pro-preview)", "留空按 CLI 默认（如 gemini-3.1-pro-preview）"), text: $defaultModel)
                         .textFieldStyle(.roundedBorder)
                 }
 

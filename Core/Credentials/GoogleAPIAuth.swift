@@ -29,9 +29,12 @@ nonisolated enum GoogleAPIMode: String, CaseIterable, Identifiable, Sendable, Co
 
     var id: String { rawValue }
 
-    func resolve(for apiKey: String) -> ResolvedMode {
+    func resolve(for apiKey: String, cachedAutoMode: ResolvedMode? = nil) -> ResolvedMode {
         switch self {
         case .auto:
+            if let cachedAutoMode {
+                return cachedAutoMode
+            }
             return apiKey.hasPrefix("AQ.") ? .vertexExpress : .aiStudio
         case .aiStudio:
             return .aiStudio
@@ -97,10 +100,23 @@ nonisolated struct GoogleAPIAuthSession: Sendable, Equatable {
     var apiKey: String
     var source: Source
     var resolvedMode: GoogleAPIMode.ResolvedMode
+    var configuredMode: GoogleAPIMode
 
-    /// 摘要同时绑定模式与 Key：切 Key 或从 AI Studio 切到 Vertex Express 时都清空旧缓存。
+    init(
+        apiKey: String,
+        source: Source,
+        resolvedMode: GoogleAPIMode.ResolvedMode,
+        configuredMode: GoogleAPIMode = .auto
+    ) {
+        self.apiKey = apiKey
+        self.source = source
+        self.resolvedMode = resolvedMode
+        self.configuredMode = configuredMode
+    }
+
+    /// 摘要同时绑定配置模式、实际模式与 Key：切 Key 或切换/自动探测出不同端点时都清空旧缓存。
     var accountKey: String {
-        let payload = "\(resolvedMode.rawValue):\(apiKey)"
+        let payload = "\(configuredMode.rawValue):\(resolvedMode.rawValue):\(apiKey)"
         return SHA256.hash(data: Data(payload.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -115,48 +131,73 @@ nonisolated struct GoogleAPIAuthSession: Sendable, Equatable {
 nonisolated enum GoogleAPIAuth {
     private static let keychainService = "com.nanvon.ccbar.google-api"
     private static let keychainAccount = "primary"
+    private static let autoResolvedModesKey = "ccbar.custom.googleAPIAutoResolvedModes"
+
+    static func keyFingerprint(_ apiKey: String) -> String {
+        SHA256.hash(data: Data(apiKey.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func cachedAutoResolvedMode(
+        for apiKey: String,
+        defaults: UserDefaults = .standard
+    ) -> GoogleAPIMode.ResolvedMode? {
+        guard let map = defaults.dictionary(forKey: autoResolvedModesKey) as? [String: String],
+              let raw = map[keyFingerprint(apiKey)]
+        else { return nil }
+        return GoogleAPIMode.ResolvedMode(rawValue: raw)
+    }
+
+    static func rememberAutoResolvedMode(
+        _ mode: GoogleAPIMode.ResolvedMode,
+        for apiKey: String,
+        defaults: UserDefaults = .standard
+    ) {
+        let fingerprint = keyFingerprint(apiKey)
+        var map = (defaults.dictionary(forKey: autoResolvedModesKey) as? [String: String]) ?? [:]
+        if map[fingerprint] == nil && map.count >= 16 {
+            map = Dictionary(uniqueKeysWithValues: map.sorted { $0.key < $1.key }.prefix(15).map { ($0.key, $0.value) })
+        }
+        guard map[fingerprint] != mode.rawValue else { return }
+        map[fingerprint] = mode.rawValue
+        defaults.set(map, forKey: autoResolvedModesKey)
+    }
 
     static func load(
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         preference: GoogleAPICredentialPreference = .automatic,
-        mode: GoogleAPIMode = .auto
+        mode: GoogleAPIMode = .auto,
+        defaults: UserDefaults = .standard
     ) -> GoogleAPIAuthSession? {
+        func makeSession(apiKey: String, source: GoogleAPIAuthSession.Source) -> GoogleAPIAuthSession {
+            let cached = (mode == .auto) ? cachedAutoResolvedMode(for: apiKey, defaults: defaults) : nil
+            return GoogleAPIAuthSession(
+                apiKey: apiKey,
+                source: source,
+                resolvedMode: mode.resolve(for: apiKey, cachedAutoMode: cached),
+                configuredMode: mode
+            )
+        }
+
         if preference == .manual {
             guard let manualKey = loadFromKeychain(), let key = sanitizeKey(manualKey) else { return nil }
-            return GoogleAPIAuthSession(
-                apiKey: key,
-                source: .manualKeychain,
-                resolvedMode: mode.resolve(for: key)
-            )
+            return makeSession(apiKey: key, source: .manualKeychain)
         }
 
         // 1. ~/.gemini/.env（Gemini CLI 官方支持的环境文件）
         let dotEnvURL = homeDirectory.appendingPathComponent(".gemini/.env")
         if let key = readKeyFromDotEnv(at: dotEnvURL) {
-            return GoogleAPIAuthSession(
-                apiKey: key,
-                source: .geminiDotEnv,
-                resolvedMode: mode.resolve(for: key)
-            )
+            return makeSession(apiKey: key, source: .geminiDotEnv)
         }
 
         // 2. 进程环境变量 GEMINI_API_KEY / GOOGLE_API_KEY
         if let key = sanitizeKey(environment["GEMINI_API_KEY"]) ?? sanitizeKey(environment["GOOGLE_API_KEY"]) {
-            return GoogleAPIAuthSession(
-                apiKey: key,
-                source: .environment,
-                resolvedMode: mode.resolve(for: key)
-            )
+            return makeSession(apiKey: key, source: .environment)
         }
 
         // 3. 自动模式降级读取 Keychain 手动配置
         if let manualKey = loadFromKeychain(), let key = sanitizeKey(manualKey) {
-            return GoogleAPIAuthSession(
-                apiKey: key,
-                source: .manualKeychain,
-                resolvedMode: mode.resolve(for: key)
-            )
+            return makeSession(apiKey: key, source: .manualKeychain)
         }
 
         return nil
@@ -225,6 +266,9 @@ nonisolated enum GoogleAPIAuth {
                 "export GOOGLE_GENAI_USE_VERTEXAI='true'",
                 "export GOOGLE_API_KEY=\(quotedKey)",
                 "unset GEMINI_API_KEY",
+                "unset GOOGLE_CLOUD_PROJECT",
+                "unset GOOGLE_CLOUD_PROJECT_ID",
+                "unset GOOGLE_CLOUD_LOCATION",
                 "",
             ].joined(separator: "\n")
         }
