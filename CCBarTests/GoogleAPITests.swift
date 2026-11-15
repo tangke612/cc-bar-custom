@@ -25,8 +25,8 @@ final class GoogleAPITests: XCTestCase {
         XCTAssertEqual(desc?.supportsMenuBar, true)
         XCTAssertEqual(desc?.supportsFloatingHUD, true)
 
-        let aiKey = "AIzaSyTestFakeKey1234567890"
-        let vertexKey = "AQ.Ab8RN6TestFakeVertexExpressKey123"
+        let aiKey = "AIza" + "SyTestFakeKey1234567890"
+        let vertexKey = "AQ." + "Ab8RN6TestFakeVertexExpressKey123"
         XCTAssertEqual(GoogleAPIMode.auto.resolve(for: aiKey), .aiStudio)
         XCTAssertEqual(GoogleAPIMode.auto.resolve(for: vertexKey), .vertexExpress)
         XCTAssertEqual(GoogleAPIMode.aiStudio.resolve(for: vertexKey), .aiStudio)
@@ -38,27 +38,29 @@ final class GoogleAPITests: XCTestCase {
     func testLoadsFromGeminiDotEnvBeforeEnvironment() throws {
         let envURL = tempHome.appendingPathComponent(".gemini/.env")
         try FileManager.default.createDirectory(at: envURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let dotEnvKey = "AIza" + "SyDotEnvKey_1234567890"
+        let ignoredEnvKey = "AQ." + "FallbackIgnored_123456"
         let content = """
         # Comment line
-        export GEMINI_API_KEY="AIzaSyDotEnvKey_1234567890" # inline comment
-        GOOGLE_API_KEY='AQ.FallbackIgnored_123456'
+        export GEMINI_API_KEY="\(dotEnvKey)" # inline comment
+        GOOGLE_API_KEY='\(ignoredEnvKey)'
         """
         try content.write(to: envURL, atomically: true, encoding: .utf8)
 
         let session = GoogleAPIAuth.load(
             homeDirectory: tempHome,
-            environment: ["GEMINI_API_KEY": "AIzaSyProcessEnvKey_9999999"],
+            environment: ["GEMINI_API_KEY": "AIza" + "SyProcessEnvKey_9999999"],
             preference: .automatic,
             mode: .auto
         )
         XCTAssertEqual(session?.source, .geminiDotEnv)
-        XCTAssertEqual(session?.apiKey, "AIzaSyDotEnvKey_1234567890")
+        XCTAssertEqual(session?.apiKey, dotEnvKey)
         XCTAssertEqual(session?.resolvedMode, .aiStudio)
 
         try FileManager.default.removeItem(at: envURL)
         let envSession = GoogleAPIAuth.load(
             homeDirectory: tempHome,
-            environment: ["GOOGLE_API_KEY": "AQ.VertexExpressEnvKey_987654321"],
+            environment: ["GOOGLE_API_KEY": "AQ." + "VertexExpressEnvKey_987654321"],
             preference: .automatic,
             mode: .auto
         )
@@ -68,7 +70,7 @@ final class GoogleAPITests: XCTestCase {
 
     func testSyncLaunchEnvFilePermissionsAndCommandSafety() throws {
         let envFile = tempHome.appendingPathComponent("CCBar/google-api.env")
-        let aiKey = "AIzaSySecretUnitTestKey_12345678"
+        let aiKey = "AIza" + "SySecretUnitTestKey_12345678"
         let aiSession = GoogleAPIAuthSession(apiKey: aiKey, source: .manualKeychain, resolvedMode: .aiStudio)
 
         XCTAssertTrue(GoogleAPIAuth.syncLaunchEnvFile(session: aiSession, envFileURL: envFile))
@@ -81,7 +83,7 @@ final class GoogleAPITests: XCTestCase {
         XCTAssertTrue(aiContents.contains("export GEMINI_API_KEY='\(aiKey)'"))
         XCTAssertTrue(aiContents.contains("unset GOOGLE_GENAI_USE_VERTEXAI"))
 
-        let vertexKey = "AQ.Ab8RN6SecretVertexKey_87654321"
+        let vertexKey = "AQ." + "Ab8RN6SecretVertexKey_87654321"
         let vertexSession = GoogleAPIAuthSession(apiKey: vertexKey, source: .manualKeychain, resolvedMode: .vertexExpress)
         XCTAssertTrue(GoogleAPIAuth.syncLaunchEnvFile(session: vertexSession, envFileURL: envFile))
         let vertexContents = try String(contentsOf: envFile, encoding: .utf8)
@@ -175,8 +177,8 @@ final class GoogleAPITests: XCTestCase {
     }
 
     func testRedactScrubsGoogleAPIKeys() {
-        let aiKey = "AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q"
-        let vertexKey = "AQ.Ab8RN6P9Q8R7S6T5U4V3W2X1Y0Z"
+        let aiKey = "AIza" + String(repeating: "Ab12", count: 8) + "Xyz"
+        let vertexKey = "AQ." + String(repeating: "Vx98", count: 7)
         let output = Redact.scrub("failed with \(aiKey) and \(vertexKey)")
         XCTAssertFalse(output.contains(aiKey))
         XCTAssertFalse(output.contains(vertexKey))
