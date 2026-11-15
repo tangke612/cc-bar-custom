@@ -296,6 +296,7 @@ final class AppState {
     private var serviceStatusRefreshGeneration = 0
 
     let usageService = UsageService(localUsageApps: { SettingsStore.shared.enabledLocalUsageApps })
+    let sessionHistory = SessionHistoryService()
     private let scheduler = Scheduler()
     private var codexAlertEntryVersion: UInt64 = 0
     private var primaryAlertEntryVersions: [QuotaApp: UInt64] = [:]
@@ -493,7 +494,8 @@ final class AppState {
             quotaInterval: settings.quotaInterval.seconds,
             usageInterval: settings.usageInterval.seconds
         )
-        // 启动后台触发一次 JSONL 扫描，让今日 cost 立刻更新（不阻塞 bootstrap）
+        // 启动后台触发一次 JSONL 扫描与历史会话索引，让今日 cost 与会话恢复列表立刻更新（不阻塞 bootstrap）
+        sessionHistory.refreshInBackground(minAge: 0)
         Task {
             await usageService.scanNow()
             await usageService.rebuildCycleUsageIfNeeded()
@@ -540,6 +542,7 @@ final class AppState {
             guard let self else { return }
             await self.refreshQuotas(reason: .userInitiated)
             await self.usageService.scanNow()
+            await self.sessionHistory.refreshNow()
             await self.refreshServiceStatus()
         }
         refreshInFlight = task

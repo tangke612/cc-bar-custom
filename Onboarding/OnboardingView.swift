@@ -9,8 +9,6 @@ import AppKit
 
 struct OnboardingView: View {
     @Environment(AppState.self) private var appState
-    @Environment(\.dismissWindow) private var dismissWindow
-    @Environment(\.openWindow) private var openWindow
     @State private var step: Int = 0
 
     var body: some View {
@@ -54,14 +52,13 @@ struct OnboardingView: View {
 
     private func finish() {
         SettingsStore.shared.didCompleteOnboarding = true
-        dismissWindow(id: "onboarding")
+        MenuBarStatusController.shared.closeOnboardingWindow()
     }
 
     private func openStats() {
         SettingsStore.shared.didCompleteOnboarding = true
-        appState.mainTab = .stats
-        openWindow(id: "main")
-        dismissWindow(id: "onboarding")
+        MenuBarStatusController.shared.closeOnboardingWindow()
+        MenuBarStatusController.shared.openMainWindow(tab: .stats)
     }
 }
 

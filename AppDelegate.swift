@@ -3,12 +3,19 @@ import UserNotifications
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var appState: AppState?
     private var openStatisticsWindow: (() -> Void)?
     private var shouldOpenStatisticsWhenReady = false
     private var terminationHandler: (@MainActor () async throws -> Void)?
     private var terminationFailureHandler: (@MainActor (Error) -> Bool)?
     private var terminationTask: Task<Void, Never>?
     private var quotaNotificationDelegate: QuotaNotificationDelegate?
+    private var didBecomeActiveObserver: NSObjectProtocol?
+    private var didStartLifecycle = false
+
+    func bind(appState: AppState) {
+        self.appState = appState
+    }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         guard !AppRuntime.isRunningUnitTests else { return }
@@ -27,10 +34,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             build=\(info?["CFBundleVersion"] as? String ?? "—") \
             macOS=\(ProcessInfo.processInfo.operatingSystemVersionString)
             """)
+
+        startRuntimeIfNeeded()
+    }
+
+    private func startRuntimeIfNeeded() {
+        // 单元测试宿主也会启动 App；此时绝不能触发真实状态栏或 bootstrap。
+        guard !AppRuntime.isRunningUnitTests, !didStartLifecycle, let appState else { return }
+        didStartLifecycle = true
+
+        MenuBarStatusController.shared.attach(appState: appState)
+
+        installTerminationHandler {
+            try await appState.prepareForTermination()
+        }
+        installTerminationFailureHandler { error in
+            AppUpdater.shared.terminationPreparationFailed(error)
+        }
+        installOpenStatisticsHandler {
+            // 首次启动仍由 Onboarding 接管，不同时打开主窗口。
+            guard SettingsStore.shared.didCompleteOnboarding else { return }
+            MenuBarStatusController.shared.openMainWindow(tab: .stats)
+        }
+
+        didBecomeActiveObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            guard !AppRuntime.isRunningUnitTests else { return }
+            MainActor.assumeIsolated {
+                _ = Task { await appState.quotaNotifications.refreshPermission() }
+            }
+        }
+
+        Task { @MainActor in
+            appState.quotaNotifications.settingsChanged(
+                clearNotifications: SettingsStore.shared.privacyMode || !SettingsStore.shared.quotaAlertsEnabled
+            )
+            await appState.bootstrap()
+            AppUpdater.shared.start()
+            FloatingPanelController.shared.attach(appState: appState)
+            FloatingPanelController.shared.openSettingsHandler = {
+                MenuBarStatusController.shared.openMainWindow(tab: .settings)
+            }
+            FloatingPanelController.shared.sync()
+        }
     }
 
     /// 退出前把缓冲里剩下的日志写完——崩溃前最后那几行往往正是要查的东西。
     func applicationWillTerminate(_ notification: Notification) {
+        if let didBecomeActiveObserver {
+            NotificationCenter.default.removeObserver(didBecomeActiveObserver)
+            self.didBecomeActiveObserver = nil
+        }
         AppLog.info(.app, "terminating")
         AppLog.shared.flushNow()
     }

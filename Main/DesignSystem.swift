@@ -156,6 +156,59 @@ private let quotaEmptyColor = adaptiveColor(
     dark: (red: 255, green: 122, blue: 144)   // #FF7A90
 )
 
+// MARK: - Popover High-Contrast Palette
+//
+// 菜单栏悬停弹窗处于非激活态（保护终端输入焦点）时，系统默认 vibrancy 与 `.tertiary` 语义灰会显著发灰发虚。
+// 这里提供不依赖窗口激活态的显式高对比浅/深色阶：
+// - 剩余进度条填充：>=20% 采用鲜明翠绿，低额度橙色，耗尽红色，与底槽形成清晰色相+明度对比；
+// - 百分比与正文数字：正常态采用高对比近黑/亮白，避免灰底灰字；
+// - 次要文案与标签：提高浅/深色明度对比，确保一眼可读。
+enum PopoverPalette {
+    static let primaryText = adaptiveColor(
+        light: (red: 20, green: 20, blue: 23),     // #141417
+        dark: (red: 245, green: 245, blue: 247)    // #F5F5F7
+    )
+
+    static let secondaryText = adaptiveColor(
+        light: (red: 60, green: 60, blue: 67),     // #3C3C43
+        dark: (red: 216, green: 216, blue: 222)    // #D8D8DE
+    )
+
+    static let mutedText = adaptiveColor(
+        light: (red: 88, green: 88, blue: 96),     // #585860
+        dark: (red: 176, green: 176, blue: 184)    // #B0B0B8
+    )
+
+    static let barNormalFill = adaptiveColor(
+        light: (red: 22, green: 163, blue: 74),    // #16A34A
+        dark: (red: 48, green: 209, blue: 88)      // #30D158
+    )
+
+    static let barLowFill = adaptiveColor(
+        light: (red: 217, green: 101, blue: 0),    // #D96500
+        dark: (red: 255, green: 159, blue: 10)     // #FF9F0A
+    )
+
+    static let barEmptyFill = adaptiveColor(
+        light: (red: 217, green: 38, blue: 56),    // #D92638
+        dark: (red: 255, green: 69, blue: 58)      // #FF453A
+    )
+
+    static func barFill(remainingPercent: Double?) -> Color {
+        guard let value = remainingPercent else { return mutedText }
+        if value <= 0 { return barEmptyFill }
+        if value < 20 { return barLowFill }
+        return barNormalFill
+    }
+
+    static func valueText(remainingPercent: Double?) -> Color {
+        guard let value = remainingPercent else { return secondaryText }
+        if value <= 0 { return quotaEmptyColor }
+        if value < 20 { return quotaLowColor }
+        return primaryText
+    }
+}
+
 /// 按浅 / 深色外观切换的固定色值（0~255）。状态色与统计页色阶共用。
 func adaptiveColor(
     light: (red: CGFloat, green: CGFloat, blue: CGFloat),
@@ -455,11 +508,20 @@ struct ProgressBar: View {
     let tint: Color
     var height: CGFloat = 5
 
+    @Environment(\.colorScheme) private var colorScheme
+
     var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill(Color.secondary.opacity(0.18))
+                    .fill(colorScheme == .dark ? Color.white.opacity(0.18) : Color.black.opacity(0.12))
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(
+                                colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.06),
+                                lineWidth: 0.5
+                            )
+                    )
 
                 Capsule()
                     .fill(tint)

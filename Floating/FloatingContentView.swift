@@ -92,7 +92,7 @@ private struct FloatingRow: View {
                     .font(.system(size: 13, weight: .semibold))
                     .kerning(-0.3)
                     .monospacedDigit()
-                    .foregroundStyle(barColor)
+                    .foregroundStyle(textColor)
                     .frame(width: Self.percentWidth, alignment: .trailing)
             }
         }
@@ -109,7 +109,11 @@ private struct FloatingRow: View {
     }
 
     private var barColor: Color {
-        statusColor(remainingPercent: snapshot?.primaryWindow?.remainingPercent, tint: tint)
+        PopoverPalette.barFill(remainingPercent: snapshot?.primaryWindow?.remainingPercent)
+    }
+
+    private var textColor: Color {
+        PopoverPalette.valueText(remainingPercent: snapshot?.primaryWindow?.remainingPercent)
     }
 
     private var isUnlimited: Bool {

@@ -55,6 +55,7 @@ struct ConversationStatsView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .task {
+            appState.sessionHistory.refreshInBackground(minAge: 2.0)
             if appState.usageService.lastScanAt.map({ Date().timeIntervalSince($0) > 60 }) ?? true {
                 await appState.usageService.scanNow()
             }
@@ -82,7 +83,7 @@ struct ConversationStatsView: View {
     private func filterRow(_ result: ConversationQueryResult) -> some View {
         @Bindable var session = appState.mainWindowSession
         return HStack(spacing: 6) {
-            StatsSearchField(prompt: tr("Search title or project", "搜索标题或项目"), text: $search)
+            StatsSearchField(prompt: tr("Search project, summary or prompt", "搜索项目、摘要或提问"), text: $search)
             projectMenu(result)
             StatsFilterMenu(items: ConversationQuerySort.allCases, label: { $0.label }, selection: $session.conversationSort)
         }
@@ -211,8 +212,9 @@ struct ConversationStatsView: View {
                     description: Text(tr("Try another keyword.", "请换一个关键词。"))
                 )
             } else {
+                let lowerSearch = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
                 StatsSelectionList(items: Array(rows.prefix(visibleLimit)), selection: $selection) { row in
-                    ConversationListRow(summary: row)
+                    ConversationListRow(summary: row, lowercasedSearch: lowerSearch)
                 } trailing: {
                     if rows.count > visibleLimit {
                         Button(tr("Show more", "显示更多")) { visibleLimit += 200 }
@@ -227,7 +229,9 @@ struct ConversationStatsView: View {
     }
 
     private var isOrganizing: Bool {
-        appState.usageService.conversationAggregator.isEmpty && appState.usageService.isScanning
+        appState.usageService.conversationAggregator.isEmpty
+            && appState.sessionHistory.records.isEmpty
+            && (appState.usageService.isScanning || appState.sessionHistory.isIndexing)
     }
 
     @ViewBuilder
@@ -238,6 +242,9 @@ struct ConversationStatsView: View {
                metric: SettingsStore.shared.statsRankMetric
            ) {
             ConversationDetailView(detail: detail)
+        } else if let selection,
+                  let sessionRecord = appState.sessionHistory.record(forKey: selection) {
+            SessionOnlyDetailView(record: sessionRecord)
         } else {
             // 与项目页一致：列表有内容时默认选中第一条。列表为空时空态已在列表栏说明，详情栏留空。
             Text(result.rows.isEmpty ? "" : tr("Select a conversation", "选择对话查看详情"))
@@ -250,15 +257,107 @@ struct ConversationStatsView: View {
     private var queryResult: ConversationQueryResult {
         let bounds = range.bounds(customFrom: customFrom, customTo: customTo)
         let aggregator = appState.usageService.conversationAggregator
-        return aggregator.query(ConversationQueryRequest(
+        let sessionHistory = appState.sessionHistory
+        _ = sessionHistory.revision
+
+        let base = aggregator.query(ConversationQueryRequest(
             revision: aggregator.revision,
             app: selectedApp,
             projectKey: projectKey,
             from: bounds.from,
             to: bounds.to,
-            search: search,
+            search: "",
             sort: sort
         ))
+
+        var combinedRows = base.rows
+        let existingKeys = Set(combinedRows.map(\.id))
+
+        // 合并本机已存在但暂无计费 Token 桶的 Codex / Antigravity 会话（保证本地历史会话均可检索与一键恢复）
+        for record in sessionHistory.records where !record.isSubagent && !existingKeys.contains(record.key) {
+            if let selectedApp, record.origin.usageApp != selectedApp { continue }
+            guard record.lastActiveAt >= bounds.from && record.lastActiveAt < bounds.to else { continue }
+            if let projectKey {
+                let recordProjectKey = (record.cwd != nil && !record.projectName.isEmpty && record.projectName != "~")
+                    ? "path:\(record.cwd!)"
+                    : "special:unassigned"
+                guard recordProjectKey == projectKey else { continue }
+            }
+            combinedRows.append(makeSyntheticSummary(from: record))
+        }
+
+        let normalizedSearch = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !normalizedSearch.isEmpty {
+            combinedRows = combinedRows.filter { summary in
+                let info = summary.info
+                let baseHaystack = [
+                    info.title ?? "",
+                    info.projectName,
+                    info.projectPath,
+                    info.conversationID,
+                ].joined(separator: " ").lowercased()
+                if baseHaystack.contains(normalizedSearch) {
+                    return true
+                }
+                if let record = sessionHistory.record(for: info),
+                   record.matches(lowercasedQuery: normalizedSearch) {
+                    return true
+                }
+                return false
+            }
+        }
+
+        combinedRows.sort { lhs, rhs in
+            switch sort {
+            case .recent:
+                return lhs.rangeLastAt > rhs.rangeLastAt
+            case .tokens:
+                return lhs.totals.totalTokens == rhs.totals.totalTokens
+                    ? lhs.rangeLastAt > rhs.rangeLastAt
+                    : lhs.totals.totalTokens > rhs.totals.totalTokens
+            case .cost:
+                return lhs.costs.total == rhs.costs.total
+                    ? lhs.rangeLastAt > rhs.rangeLastAt
+                    : lhs.costs.total > rhs.costs.total
+            }
+        }
+
+        return ConversationQueryResult(
+            rows: combinedRows,
+            projectOptions: base.projectOptions,
+            projectConversationCount: base.projectConversationCount,
+            projectKeys: base.projectKeys,
+            duplicateProjectNames: base.duplicateProjectNames
+        )
+    }
+
+    private func makeSyntheticSummary(from record: SessionHistoryRecord) -> ConversationSummary {
+        let hasProject = record.cwd != nil && !record.projectName.isEmpty && record.projectName != "~"
+        let info = ConversationInfo(
+            key: record.key,
+            conversationID: record.sessionID,
+            app: record.origin.usageApp,
+            title: record.primaryTitle,
+            projectKey: hasProject ? "path:\(record.cwd!)" : "special:unassigned",
+            projectName: hasProject ? record.projectName : "",
+            projectPath: record.cwd ?? "",
+            projectStatus: hasProject ? .unverified : .unassigned,
+            projectSource: hasProject ? .cwd : .unassigned,
+            gitBranch: nil,
+            sourcePaths: [],
+            firstAt: record.createdAt ?? record.lastActiveAt,
+            lastAt: record.lastActiveAt,
+            includesSubtasks: false,
+            cacheCreationAvailable: false
+        )
+        return ConversationSummary(
+            info: info,
+            totals: .zero,
+            costs: ConversationCostTotals(),
+            speed: UsageSpeedBreakdown(),
+            models: [],
+            rangeLastAt: record.lastActiveAt
+        )
     }
 
     private var selectedApp: UsageApp? {
@@ -389,15 +488,46 @@ struct ConversationScanStatus: View {
 private struct ConversationListRow: View {
     @Environment(AppState.self) private var appState
     let summary: ConversationSummary
+    var lowercasedSearch: String = ""
+
+    private var sessionRecord: SessionHistoryRecord? {
+        appState.sessionHistory.record(for: summary.info)
+    }
+
+    private var resumeCommand: SessionResumeCommand? {
+        appState.sessionHistory.resumeCommand(for: summary.info)
+    }
+
+    private var displayTitle: String {
+        if PrivacyDisplay.isEnabled {
+            return PrivacyDisplay.conversation(summary.info)
+        }
+        if let existing = summary.info.title, !existing.isEmpty {
+            return existing
+        }
+        if let fallback = sessionRecord?.primaryTitle, !fallback.isEmpty {
+            return fallback
+        }
+        return tr("Untitled", "（无标题）")
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 7) {
+            HStack(spacing: 6) {
                 ServiceTile(app: summary.info.app, size: 14)
-                Text(PrivacyDisplay.conversation(summary.info))
+                Text(displayTitle)
                     .font(.system(size: 12.5, weight: .medium))
                     .lineLimit(1)
-                Spacer()
+                if let badge = sessionRecord?.origin.sourceBadge {
+                    Text(badge)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Color.secondary.opacity(0.12), in: Capsule())
+                        .fixedSize()
+                }
+                Spacer(minLength: 4)
                 Text("\(StatsFormatter.day(summary.rangeLastAt)) \(StatsFormatter.time(summary.rangeLastAt))")
                     .font(.system(size: 10.5))
                     .monospacedDigit()
@@ -410,19 +540,37 @@ private struct ConversationListRow: View {
                     .lineLimit(1)
                     .fixedSize()
                     .help(projectHelp)
-                Text("·")
-                Text(summary.models.joined(separator: ", ")).lineLimit(1)
-                UsageSpeedBadge(summary: summary.speed.summary)
+                if !summary.models.isEmpty {
+                    Text("·")
+                    Text(summary.models.joined(separator: ", ")).lineLimit(1)
+                    UsageSpeedBadge(summary: summary.speed.summary)
+                } else if !PrivacyDisplay.isEnabled, let promptPreview = sessionRecord?.secondaryPromptPreview {
+                    Text("·")
+                    Text(promptPreview).lineLimit(1)
+                }
             }
             .font(.system(size: 10.5))
             .foregroundStyle(.secondary)
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+
+            if !PrivacyDisplay.isEnabled,
+               let matchedSnippet = sessionRecord?.matchingSnippet(lowercasedQuery: lowercasedSearch) {
+                Text(matchedSnippet)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+
+            HStack(alignment: .center, spacing: 8) {
                 Text(tr("\(summary.totals.requestCount) requests", "\(summary.totals.requestCount) 次请求"))
-                Spacer()
+                Spacer(minLength: 4)
                 Text("\(StatsFormatter.compactToken(summary.totals.totalTokens)) Tokens")
                 Text(costLabel(summary.costs))
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(.primary)
+                if let resumeCommand {
+                    CopyResumeCommandButton(resumeCommand: resumeCommand, compact: true)
+                }
             }
             .lineLimit(1)
             .font(.system(size: 10.5))
@@ -433,19 +581,35 @@ private struct ConversationListRow: View {
 
     private var projectLabel: String {
         if PrivacyDisplay.isEnabled {
+            if summary.info.projectStatus.isPathBased {
+                return StatsProjectLabel.name(appState.usageService.conversationAggregator.statsProjectIdentity(for: summary.info))
+            }
+            if let cwd = sessionRecord?.cwd, !cwd.isEmpty {
+                return PrivacyDisplay.project("path:\(cwd)")
+            }
             return StatsProjectLabel.name(appState.usageService.conversationAggregator.statsProjectIdentity(for: summary.info))
         }
         switch summary.info.projectStatus {
-        case .unassigned: return tr("No project", "无明确项目")
-        case .system: return tr("System task", "系统任务")
-        case .available, .unavailable, .unverified: return summary.info.projectName
+        case .unassigned:
+            if let recovered = sessionRecord?.projectName, !recovered.isEmpty, recovered != "~" {
+                return recovered
+            }
+            return tr("No project", "无明确项目")
+        case .system:
+            return tr("System task", "系统任务")
+        case .available, .unavailable, .unverified:
+            return summary.info.projectName
         }
     }
 
     private var projectHelp: String {
         if PrivacyDisplay.isEnabled { return projectLabel }
         switch summary.info.projectStatus {
-        case .unassigned: return tr("No reliable project could be identified", "未能可靠识别项目")
+        case .unassigned:
+            if let cwd = sessionRecord?.cwd, !cwd.isEmpty {
+                return cwd
+            }
+            return tr("No reliable project could be identified", "未能可靠识别项目")
         case .system: return tr("Usage created by CCBar background tasks", "CCBar 后台任务产生的用量")
         case .unavailable: return "\(summary.info.projectPath) · \(tr("Unavailable", "已不存在"))"
         case .available, .unverified: return summary.info.projectPath
@@ -453,7 +617,78 @@ private struct ConversationListRow: View {
     }
 }
 
+private struct SessionOnlyDetailView: View {
+    let record: SessionHistoryRecord
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 8) {
+                    ServiceTile(app: record.origin.usageApp, size: 14)
+                    Text(record.origin.usageApp.displayName)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    if let badge = record.origin.sourceBadge {
+                        Text(badge)
+                            .font(.system(size: 9.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1.5)
+                            .background(Color.secondary.opacity(0.12), in: Capsule())
+                    }
+                    Spacer()
+                    CopyResumeCommandButton(resumeCommand: record.resumeCommand, compact: false)
+                }
+
+                Text(PrivacyDisplay.isEnabled ? tr("Session", "会话") : (record.primaryTitle ?? tr("Untitled", "（无标题）")))
+                    .font(.system(size: 18, weight: .semibold))
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+
+                if let cwd = record.cwd, !cwd.isEmpty {
+                    PrivacySensitiveText(text: cwd, sensitive: true)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                }
+
+                if !PrivacyDisplay.isEnabled {
+                    DetailPanel(title: tr("Prompt summary", "提问摘要")) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            if let first = record.firstPrompt {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(tr("First prompt", "首条提问"))
+                                        .font(.system(size: 10.5, weight: .semibold))
+                                        .foregroundStyle(.tertiary)
+                                    Text(first)
+                                        .font(.system(size: 12))
+                                        .textSelection(.enabled)
+                                }
+                            }
+                            if let latest = record.latestPrompt, latest != record.firstPrompt {
+                                Divider()
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(tr("Latest prompt", "最近提问"))
+                                        .font(.system(size: 10.5, weight: .semibold))
+                                        .foregroundStyle(.tertiary)
+                                    Text(latest)
+                                        .font(.system(size: 12))
+                                        .textSelection(.enabled)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(20)
+        }
+    }
+}
+
 private struct ConversationDetailView: View {
+    @Environment(AppState.self) private var appState
     let detail: ConversationDetail
 
     var body: some View {
@@ -480,6 +715,10 @@ private struct ConversationDetailView: View {
         }
     }
 
+    private var sessionRecord: SessionHistoryRecord? {
+        appState.sessionHistory.record(for: detail.info)
+    }
+
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
@@ -487,6 +726,14 @@ private struct ConversationDetailView: View {
                 Text(detail.info.app.displayName)
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(.secondary)
+                if let badge = sessionRecord?.origin.sourceBadge {
+                    Text(badge)
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1.5)
+                        .background(Color.secondary.opacity(0.12), in: Capsule())
+                }
                 Text(tr("All time", "全部时间"))
                     .font(.system(size: 9.5, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -499,13 +746,16 @@ private struct ConversationDetailView: View {
                     ))
                 UsageSpeedBadge(summary: detail.speed.summary)
                 Spacer()
+                if let resumeCommand = appState.sessionHistory.resumeCommand(for: detail.info) {
+                    CopyResumeCommandButton(resumeCommand: resumeCommand, compact: false)
+                }
             }
-            Text(PrivacyDisplay.conversation(detail.info))
+            Text(detailTitle)
                 .font(.system(size: 18, weight: .semibold))
                 .lineLimit(2)
                 .textSelection(.enabled)
-            PrivacySensitiveText(text: projectText, sensitive: detail.info.projectStatus.isPathBased)
-                .font(.system(size: 11, design: detail.info.projectStatus.isPathBased ? .monospaced : .default))
+            PrivacySensitiveText(text: projectText, sensitive: hasSensitiveProjectPath)
+                .font(.system(size: 11, design: hasSensitiveProjectPath ? .monospaced : .default))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -801,9 +1051,24 @@ private struct ConversationDetailView: View {
         detail.info.cacheCreationAvailable ? StatsFormatter.compactToken(detail.totals.cacheCreationTokens) : "N/A"
     }
 
+    private var detailTitle: String {
+        if PrivacyDisplay.isEnabled { return PrivacyDisplay.conversation(detail.info) }
+        if let existing = detail.info.title, !existing.isEmpty { return existing }
+        if let fallback = sessionRecord?.primaryTitle, !fallback.isEmpty { return fallback }
+        return tr("Untitled", "（无标题）")
+    }
+
+    private var hasSensitiveProjectPath: Bool {
+        detail.info.projectStatus.isPathBased || !(sessionRecord?.cwd ?? "").isEmpty
+    }
+
     private var projectText: String {
         switch detail.info.projectStatus {
-        case .unassigned: return tr("No project", "无明确项目")
+        case .unassigned:
+            if let cwd = sessionRecord?.cwd, !cwd.isEmpty {
+                return cwd
+            }
+            return tr("No project", "无明确项目")
         case .system: return tr("CCBar system task", "CCBar 系统任务")
         case .unavailable: return "\(detail.info.projectPath) · \(tr("Unavailable", "已不存在"))"
         case .available, .unverified: return detail.info.projectPath

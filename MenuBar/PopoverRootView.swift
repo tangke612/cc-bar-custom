@@ -11,7 +11,7 @@ import AppKit
 
 struct PopoverRootView: View {
     @Environment(AppState.self) private var appState
-    @Environment(\.openWindow) private var openWindow
+    @Environment(MenuBarPopoverState.self) private var popoverState
     @State private var refreshRotation: Double = 0
 
     var body: some View {
@@ -23,7 +23,7 @@ struct PopoverRootView: View {
             content
 
             if SettingsStore.shared.showRecentConversations {
-                RecentConversationsSection(onOpen: openConversation)
+                RecentSessionsQuickSection(onOpenSession: openSessionInStats)
             }
 
             if let version = AppUpdater.shared.availableVersion {
@@ -59,13 +59,14 @@ struct PopoverRootView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(tr("Quota", "额度"))
                     .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(PopoverPalette.primaryText)
 
                 // 用 TimelineView 每秒重新渲染一次,让 "Xs 前已刷新" 实时滚动。
                 // Popover 不可见时 TimelineView 不会被调度,几乎零 CPU 成本。
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     Text(headerSubtitle(now: context.date))
                         .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(PopoverPalette.secondaryText)
                         .monospacedDigit()
                         .lineLimit(1)
                 }
@@ -81,10 +82,39 @@ struct PopoverRootView: View {
                     .padding(.trailing, 4)
             }
 
+            if popoverState.isPinned {
+                Button {
+                    MenuBarStatusController.shared.togglePinFromHeader()
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(tr("Pinned", "已固定"))
+                            .font(.system(size: 10.5, weight: .medium))
+                    }
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 6.5)
+                    .padding(.vertical, 3.5)
+                    .background(Color.accentColor.opacity(0.14), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .help(tr("Pinned (click to unpin or press Esc)", "已固定面板（点击取消固定或按 Esc 恢复自动收起）"))
+            } else {
+                Button {
+                    MenuBarStatusController.shared.togglePinFromHeader()
+                } label: {
+                    Image(systemName: "pin")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(PopoverPalette.secondaryText)
+                }
+                .buttonStyle(PopoverIconButtonStyle())
+                .help(tr("Pin panel", "固定面板"))
+            }
+
             Button(action: refresh) {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(PopoverPalette.secondaryText)
                     .rotationEffect(.degrees(refreshRotation))
                     .animation(.easeInOut(duration: 0.7), value: refreshRotation)
             }
@@ -96,7 +126,7 @@ struct PopoverRootView: View {
             Button { activateAndOpenMain(tab: .stats) } label: {
                 Image(systemName: "chart.bar.xaxis")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(PopoverPalette.secondaryText)
             }
             .buttonStyle(PopoverIconButtonStyle())
             .help(tr("Open Statistics", "查看统计"))
@@ -104,7 +134,7 @@ struct PopoverRootView: View {
             Button { activateAndOpenMain(tab: .settings) } label: {
                 Image(systemName: "gearshape")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(PopoverPalette.secondaryText)
             }
             .buttonStyle(PopoverIconButtonStyle())
             .help(tr("Settings", "设置"))
@@ -112,11 +142,12 @@ struct PopoverRootView: View {
             Button { NSApp.terminate(nil) } label: {
                 Image(systemName: "power")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(PopoverPalette.secondaryText)
             }
             .buttonStyle(PopoverIconButtonStyle())
             .help(tr("Quit", "退出"))
         }
+        .animation(.snappy(duration: 0.18, extraBounce: 0), value: popoverState.isPinned)
         .padding(.top, 14)
         .padding(.horizontal, 12)
         .padding(.bottom, 12)
@@ -401,14 +432,12 @@ struct PopoverRootView: View {
     /// 先设置 `mainTab` 再 openWindow,确保点「统计」/「设置」总是落到对应 tab,
     /// 不受上次窗口停留 tab 影响(与 ⌘, / ⌘1 命令行为一致)。
     private func activateAndOpenMain(tab: MainTab) {
-        appState.mainTab = tab
-        NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: "main")
+        MenuBarStatusController.shared.openMainWindow(tab: tab)
     }
 
-    /// 「最近对话」行：打开统计页对话视图并选中该对话。
-    private func openConversation(_ summary: ConversationSummary) {
-        appState.pendingStatsConversation = PendingStatsConversation(key: summary.info.key, app: summary.info.app)
+    /// 「最近会话」快捷行：打开统计页对话视图并选中该会话。
+    private func openSessionInStats(key: String, app: UsageApp) {
+        appState.pendingStatsConversation = PendingStatsConversation(key: key, app: app)
         activateAndOpenMain(tab: .stats)
     }
 
@@ -516,12 +545,12 @@ private struct ServiceBlockView: View {
                 Text(title)
                     .font(.system(size: 13, weight: .semibold))
                     .kerning(-0.1)
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(PopoverPalette.primaryText)
                     .lineLimit(1)
                     .layoutPriority(1)
                 Text(subtitle)
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(PopoverPalette.secondaryText)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -565,7 +594,7 @@ private struct ServiceBlockView: View {
                     Text("∞")
                         .font(.system(size: 32, weight: .semibold))
                         .kerning(-0.8)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(PopoverPalette.primaryText)
                         .lineLimit(1)
                 } else {
                     HStack(alignment: .firstTextBaseline, spacing: 0) {
@@ -573,12 +602,12 @@ private struct ServiceBlockView: View {
                             .font(.system(size: 32, weight: .semibold))
                             .monospacedDigit()
                             .kerning(-0.8)
-                            .foregroundStyle(primaryColor)
+                            .foregroundStyle(primaryTextColor)
                             .lineLimit(1)
                         if hasPrimaryLimit {
                             Text("%")
                                 .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(primaryColor.opacity(0.75))
+                                .foregroundStyle(primaryTextColor.opacity(0.85))
                         }
                     }
                     .fixedSize()
@@ -587,7 +616,7 @@ private struct ServiceBlockView: View {
                 Text(primaryLimitTitle)
                     .font(.system(size: 9, weight: .semibold))
                     .kerning(0.5)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(PopoverPalette.secondaryText)
                     .lineLimit(1)
                     .minimumScaleFactor(app == .antigravity ? 0.75 : 1)
             }
@@ -598,14 +627,14 @@ private struct ServiceBlockView: View {
                 // Unlimited 没有可填充的比例，进度条会被读成「已用满」；左栏已经写了
                 // 「不限额度」，这里不再重复第二遍，只保留计费周期重置时间。
                 if !isUnlimited {
-                    ProgressBar(value: primaryRemaining / 100, tint: primaryColor, height: 7)
+                    ProgressBar(value: primaryRemaining / 100, tint: primaryBarColor, height: 7)
                 }
 
                 VStack(spacing: 1) {
                     HStack(spacing: 0) {
                         ResetTimeText(resetsAt: snapshot?.primaryLimit?.window.resetsAt)
                             .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.primary)
+                            .foregroundStyle(PopoverPalette.primaryText)
                             .lineLimit(1)
 
                         Spacer(minLength: 8)
@@ -625,7 +654,7 @@ private struct ServiceBlockView: View {
                     HStack(spacing: 0) {
                         BilingualInline(english: "reset", chinese: "重置")
                             .font(.system(size: 9.5))
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(PopoverPalette.mutedText)
 
                         // Spacer 必须在 showsCost 之外：showsCost 为 false 时这行只剩
                         // 一个子视图，HStack 会把它居中，"重置"会跑到行中间。
@@ -634,7 +663,7 @@ private struct ServiceBlockView: View {
                         if showsCost {
                             BilingualInline(english: "cost", chinese: "费用")
                                 .font(.system(size: 9.5))
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(PopoverPalette.mutedText)
                         }
                     }
                 }
@@ -645,21 +674,22 @@ private struct ServiceBlockView: View {
 
     private func compactLimitRow(_ limit: QuotaLimit) -> some View {
         let remaining = limit.window.remainingPercent
-        let color = statusColor(remainingPercent: remaining, tint: tint)
+        let barColor = PopoverPalette.barFill(remainingPercent: remaining)
+        let textColor = PopoverPalette.valueText(remainingPercent: remaining)
         return HStack(spacing: 10) {
             Text(compactLimitLabel(limit))
                 .font(.system(size: 9, weight: .semibold))
                 .kerning(0.6)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(PopoverPalette.secondaryText)
                 .lineLimit(1)
                 .frame(width: 72, alignment: .leading)
 
-            ProgressBar(value: remaining / 100, tint: color, height: 2.5)
+            ProgressBar(value: remaining / 100, tint: barColor, height: 3.5)
 
             Text("\(Int(remaining.rounded()))%")
-                .font(.system(size: 10.5, weight: .medium))
+                .font(.system(size: 10.5, weight: .semibold))
                 .monospacedDigit()
-                .foregroundStyle(color)
+                .foregroundStyle(textColor)
                 .frame(width: 32, alignment: .trailing)
 
             compactLimitStatus(limit)
@@ -676,17 +706,17 @@ private struct ServiceBlockView: View {
         {
             Text(tr("Unused", "尚未使用"))
                 .font(.system(size: 10.5))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(PopoverPalette.mutedText)
                 .lineLimit(1)
         } else if let resetsAt = limit.window.resetsAt {
             ResetTimeText(resetsAt: resetsAt)
                 .font(.system(size: 10.5))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(PopoverPalette.secondaryText)
                 .lineLimit(1)
         } else {
             Text(tr("Unknown", "未知"))
                 .font(.system(size: 10.5))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(PopoverPalette.mutedText)
                 .lineLimit(1)
         }
     }
@@ -723,11 +753,11 @@ private struct ServiceBlockView: View {
         HStack(spacing: 4) {
             BilingualInline(english: english, chinese: chinese)
                 .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(PopoverPalette.mutedText)
             Text(value)
                 .font(.system(size: 11, weight: .medium))
                 .monospacedDigit()
-                .foregroundStyle(.primary)
+                .foregroundStyle(PopoverPalette.primaryText)
         }
     }
 
@@ -737,9 +767,14 @@ private struct ServiceBlockView: View {
         snapshot?.primaryWindow?.remainingPercent ?? 0
     }
 
-    private var primaryColor: Color {
-        guard hasPrimaryLimit, !isUnlimited else { return .secondary }
-        return statusColor(remainingPercent: primaryRemaining, tint: tint)
+    private var primaryBarColor: Color {
+        guard hasPrimaryLimit, !isUnlimited else { return PopoverPalette.mutedText }
+        return PopoverPalette.barFill(remainingPercent: primaryRemaining)
+    }
+
+    private var primaryTextColor: Color {
+        guard hasPrimaryLimit, !isUnlimited else { return PopoverPalette.mutedText }
+        return PopoverPalette.valueText(remainingPercent: primaryRemaining)
     }
 
     private var visibleSecondaryLimit: QuotaLimit? {
@@ -815,130 +850,227 @@ private struct ServiceBlockView: View {
     }
 }
 
-// MARK: - RecentConversationsSection
-//
-// 见 docs/界面布局.md §1.4.6。Popover 底部列出今天有活动的本机对话，条数按设置（3～10，默认 5），
-// 按最近活动倒序；没有时整块不渲染。用量按对话全部时间汇总，与对话详情口径一致。
+// MARK: - RecentSessionsQuickSection (Popover 底部最近会话快捷区 + 搜索 + 一键复制恢复命令)
 
-private struct RecentConversationsSection: View {
+private struct RecentSessionsQuickSection: View {
     @Environment(AppState.self) private var appState
-    let onOpen: (ConversationSummary) -> Void
+    @Environment(MenuBarPopoverState.self) private var popoverState
+    let onOpenSession: (String, UsageApp) -> Void
 
     var body: some View {
-        // 每分钟重算一次，过了零点后换成新一天的对话。日志更新另由聚合器的 revision 驱动。
-        TimelineView(.periodic(from: .now, by: 60)) { context in
-            let rows = recentRows(now: context.date)
-            if !rows.isEmpty {
-                VStack(spacing: 0) {
+        @Bindable var bindablePopover = popoverState
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            let trimmedQuery = popoverState.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let isSearching = !trimmedQuery.isEmpty
+            let rows = matchingRows(query: trimmedQuery, isSearching: isSearching)
+            let shouldRenderSection = isSearching || !rows.isEmpty || !appState.sessionHistory.records.isEmpty
+
+            if shouldRenderSection {
+                VStack(spacing: 6) {
                     Divider().padding(.horizontal, 16)
+
                     sectionHeader
-                    VStack(spacing: 0) {
-                        ForEach(rows) { summary in
-                            RecentConversationRow(summary: summary) { onOpen(summary) }
+
+                    PopoverSearchField(
+                        placeholder: tr("Search project, summary or prompt…", "搜索项目、摘要或提问…"),
+                        text: $bindablePopover.searchText,
+                        onActivateFocus: {
+                            MenuBarStatusController.shared.activateForSearch()
+                        },
+                        onEscape: {
+                            MenuBarStatusController.shared.handleEscapeKey()
                         }
+                    )
+                    .padding(.horizontal, 12)
+
+                    if rows.isEmpty {
+                        Text(isSearching
+                             ? tr("No matching sessions", "未找到匹配的会话")
+                             : tr("No recent Codex or Antigravity sessions", "暂无最近会话"))
+                            .font(.system(size: 11))
+                            .foregroundStyle(PopoverPalette.mutedText)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.vertical, 10)
+                    } else if rows.count > 5 {
+                        ScrollView {
+                            rowsStack(rows: rows, lowerQuery: trimmedQuery.lowercased(), now: context.date)
+                        }
+                        .frame(maxHeight: 220)
+                        .padding(.bottom, 6)
+                    } else {
+                        rowsStack(rows: rows, lowerQuery: trimmedQuery.lowercased(), now: context.date)
+                            .padding(.bottom, 6)
                     }
-                    .padding(.horizontal, 6)
-                    .padding(.bottom, 8)
                 }
             }
         }
     }
 
-    /// Cursor 没有本机会话 ID，不进对话聚合；其余按统计服务开关过滤。
-    private func recentRows(now: Date) -> [ConversationSummary] {
-        let apps = Set(SettingsStore.shared.visibleUsageApps.filter { $0 != .cursor })
-        guard !apps.isEmpty else { return [] }
-        // 起点固定为今天 0 点，同一天内重复渲染直接命中聚合器缓存。
-        return appState.usageService.conversationAggregator.recentConversations(
-            since: Calendar.current.startOfDay(for: now),
-            apps: apps,
-            limit: SettingsStore.shared.recentConversationLimit
+    private func rowsStack(
+        rows: [SessionHistoryRecord],
+        lowerQuery: String,
+        now: Date
+    ) -> some View {
+        VStack(spacing: 1) {
+            ForEach(rows) { record in
+                QuickSessionResumeRow(
+                    record: record,
+                    lowercasedQuery: lowerQuery,
+                    now: now,
+                    preventAppActivation: !popoverState.isPinned,
+                    onOpen: {
+                        onOpenSession(record.key, record.origin.usageApp)
+                    },
+                    onHoverDesktopHintChange: { hovering in
+                        popoverState.desktopResumeHintVisible = hovering
+                    }
+                )
+            }
+        }
+        .padding(.horizontal, 6)
+    }
+
+    private func matchingRows(query: String, isSearching: Bool) -> [SessionHistoryRecord] {
+        let limit = isSearching ? 12 : SettingsStore.shared.recentConversationLimit
+        return appState.sessionHistory.querySessions(
+            search: query,
+            includeSubagentsWhenEmptySearch: false,
+            limit: limit
         )
     }
 
-    /// 辅助模块，标题只用一行 tertiary 小字，不加条数，视觉重点留给上方额度。
     private var sectionHeader: some View {
-        Text(tr("Recent conversations", "最近对话"))
-            .font(.system(size: 11))
-            .foregroundStyle(.tertiary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 16)
-            .padding(.top, 10)
-            .padding(.bottom, 2)
+        HStack(spacing: 6) {
+            Text(tr("Recent sessions", "最近会话"))
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(PopoverPalette.secondaryText)
+
+            Spacer(minLength: 4)
+
+            if popoverState.desktopResumeHintVisible {
+                Text(tr("Run /resume in terminal", "进终端后输入 /resume 恢复桌面端会话"))
+                    .font(.system(size: 10))
+                    .foregroundStyle(PopoverPalette.secondaryText)
+                    .lineLimit(1)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: popoverState.desktopResumeHintVisible)
+        .padding(.horizontal, 14)
+        .padding(.top, 8)
     }
 }
 
-private struct RecentConversationRow: View {
-    let summary: ConversationSummary
-    let action: () -> Void
+private struct QuickSessionResumeRow: View {
+    let record: SessionHistoryRecord
+    let lowercasedQuery: String
+    let now: Date
+    let preventAppActivation: Bool
+    let onOpen: () -> Void
+    let onHoverDesktopHintChange: (Bool) -> Void
 
     @State private var hovering = false
 
-    private var hasTitle: Bool { !(summary.info.title ?? "").isEmpty }
-
-    private var title: String {
-        if PrivacyDisplay.isEnabled || hasTitle { return PrivacyDisplay.conversation(summary.info) }
-        return tr("Untitled", "（无标题）")
+    private var displayTitle: String {
+        if PrivacyDisplay.isEnabled {
+            let dummy = ConversationInfo(
+                key: record.key,
+                conversationID: record.sessionID,
+                app: record.origin.usageApp,
+                title: record.primaryTitle,
+                projectKey: record.cwd ?? "",
+                projectName: record.projectName,
+                projectPath: record.cwd ?? "",
+                projectStatus: record.cwd == nil ? .unassigned : .available,
+                projectSource: .cwd,
+                gitBranch: nil,
+                sourcePaths: [],
+                firstAt: record.lastActiveAt,
+                lastAt: record.lastActiveAt,
+                includesSubtasks: false,
+                cacheCreationAvailable: false
+            )
+            return PrivacyDisplay.conversation(dummy)
+        }
+        return record.primaryTitle ?? tr("Untitled", "（无标题）")
     }
 
-    var body: some View {
-        Button(action: action) {
-            // 左侧服务图标、右侧速度都在两行文字之间垂直居中。
-            HStack(alignment: .center, spacing: 8) {
-                ServiceTile(app: summary.info.app, size: 16)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    // 标题接近黑色但不压过上方额度：primary 降一点不透明度，regular 字重。
-                    Text(title)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(hasTitle || PrivacyDisplay.isEnabled
-                            ? AnyShapeStyle(Color.primary.opacity(0.85))
-                            : AnyShapeStyle(.tertiary))
-                        .lineLimit(1)
-
-                    // Tokens、费用、缓存命中率合成一句 tertiary 元信息，常驻显示；命中率不加文字标签。
-                    Text(metaLine)
-                        .font(.system(size: 10.5))
-                        .monospacedDigit()
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                // 数字里只突出速度（secondary .medium）。
-                Text("\(speedValue) t/s")
-                    .font(.system(size: 11.5, weight: .medium))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .fixedSize()
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .contentShape(Rectangle())
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.primary.opacity(hovering ? 0.04 : 0))
-            )
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
+    private var hasRealTitle: Bool {
+        record.primaryTitle != nil
     }
 
     private var metaLine: String {
-        let tokens = StatsFormatter.compactToken(summary.totals.totalTokens)
-        let cost = StatsFormatter.cost(summary.costs.total)
-        let cache = StatsFormatter.percent(summary.totals.cacheHitRate)
-        return "\(tokens) Tokens · \(cost) · \(cache)"
+        let age = PopoverRootView.relativeAge(from: record.lastActiveAt, now: now)
+        let projectPart: String
+        if PrivacyDisplay.isEnabled {
+            projectPart = record.cwd.map { PrivacyDisplay.project("path:\($0)") } ?? tr("No project", "无项目")
+        } else if !record.projectName.isEmpty {
+            projectPart = record.projectName
+        } else {
+            projectPart = tr("No cwd", "无目录")
+        }
+
+        if !PrivacyDisplay.isEnabled,
+           let matchedSnippet = record.matchingSnippet(lowercasedQuery: lowercasedQuery) {
+            return "\(projectPart) · \(matchedSnippet)"
+        }
+        return "\(projectPart) · \(age)"
     }
 
-    /// 输出速度只取数字，单位 `t/s` 由调用处拼接；口径同 `StatsFormatter.outputSpeed(_:)`（含 Pi 近似值时前缀 ≈）。
-    private var speedValue: String {
-        let timing = summary.totals.timing
-        let includingEstimated = SettingsStore.shared.piEstimatedOutputSpeed
-        guard let speed = timing.outputTokensPerSecond(includingEstimated: includingEstimated), speed.isFinite else {
-            return "—"
+    var body: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Button(action: onOpen) {
+                HStack(alignment: .center, spacing: 8) {
+                    ServiceTile(app: record.origin.usageApp, size: 16)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 5) {
+                            Text(displayTitle)
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(hasRealTitle || PrivacyDisplay.isEnabled
+                                    ? PopoverPalette.primaryText
+                                    : PopoverPalette.mutedText)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+
+                            if let badge = record.origin.sourceBadge {
+                                Text(badge)
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .foregroundStyle(PopoverPalette.secondaryText)
+                                    .padding(.horizontal, 4.5)
+                                    .padding(.vertical, 1)
+                                    .background(PopoverPalette.secondaryText.opacity(0.14), in: Capsule())
+                                    .fixedSize()
+                            }
+                        }
+
+                        Text(metaLine)
+                            .font(.system(size: 10.5))
+                            .monospacedDigit()
+                            .foregroundStyle(PopoverPalette.secondaryText)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(PrivacyDisplay.help(record.cwd ?? record.sessionID))
+
+            CopyResumeCommandButton(
+                resumeCommand: record.resumeCommand,
+                compact: true,
+                preventAppActivation: preventAppActivation,
+                onHoverDesktopHintChange: onHoverDesktopHintChange
+            )
         }
-        let prefix = timing.usesEstimatedSpeed(includingEstimated: includingEstimated) ? "≈" : ""
-        return "\(prefix)\(Int(speed.rounded()))"
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4.5)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.primary.opacity(hovering ? 0.045 : 0))
+        )
+        .onHover { hovering = $0 }
     }
 }

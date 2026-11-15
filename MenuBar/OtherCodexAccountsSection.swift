@@ -39,14 +39,14 @@ struct OtherCodexAccountsSection: View {
             Text(tr("OTHER CODEX ACCOUNTS", "其他 Codex 账号"))
                 .font(.system(size: 9.5, weight: .semibold))
                 .kerning(0.3)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(PopoverPalette.secondaryText)
 
             Spacer()
 
             Text("\(count)")
                 .font(.system(size: 9.5, weight: .semibold))
                 .monospacedDigit()
-                .foregroundStyle(.quaternary)
+                .foregroundStyle(PopoverPalette.mutedText)
         }
         .padding(.horizontal, 16)
         .padding(.top, 10)
@@ -72,13 +72,14 @@ private struct ImportedCodexRow: View {
             VStack(alignment: .leading, spacing: 1) {
                 if !displayName.isEmpty {
                     Text(displayName)
-                        .font(.system(size: 12))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(PopoverPalette.primaryText)
                         .lineLimit(1)
                 }
                 if !displaySubtitle.isEmpty {
                     Text(displaySubtitle)
                         .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(PopoverPalette.secondaryText)
                         .lineLimit(1)
                 }
             }
@@ -116,25 +117,25 @@ private struct ImportedCodexRow: View {
             Text(label)
                 .font(.system(size: 9, weight: .semibold))
                 .kerning(0.5)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(PopoverPalette.secondaryText)
                 .frame(width: 18, alignment: .leading)
 
             // 标签 / 条高 / 数值字号与主卡片的次要额度行（compactLimitRow）一致。
             ProgressBar(
                 value: (window?.remainingPercent ?? 0) / 100,
-                tint: rowColor(window: window),
-                height: 2.5
+                tint: PopoverPalette.barFill(remainingPercent: window?.remainingPercent),
+                height: 3.5
             )
 
             Text(percentText(window: window))
-                .font(.system(size: 10.5, weight: .medium))
+                .font(.system(size: 10.5, weight: .semibold))
                 .monospacedDigit()
-                .foregroundStyle(rowColor(window: window))
+                .foregroundStyle(PopoverPalette.valueText(remainingPercent: window?.remainingPercent))
                 .frame(width: 30, alignment: .trailing)
 
             ResetTimeText(resetsAt: window?.resetsAt)
                 .font(.system(size: 10.5))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(PopoverPalette.secondaryText)
                 .frame(width: 70, alignment: .trailing)
         }
     }
@@ -199,11 +200,6 @@ private struct ImportedCodexRow: View {
         }
         if let plan = CodexAccount.planName(account.planType) { parts.append(plan) }
         return parts.joined(separator: " · ")
-    }
-
-    private func rowColor(window: QuotaWindow?) -> Color {
-        guard let window else { return .secondary }
-        return statusColor(remainingPercent: window.remainingPercent, tint: .codexAccent)
     }
 
     private func percentText(window: QuotaWindow?) -> String {
