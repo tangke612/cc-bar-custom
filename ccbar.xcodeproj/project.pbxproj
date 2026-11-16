@@ -179,6 +179,10 @@
 		5D1F520CBD88FCB7FDC4354A /* SessionHistoryScanner+Paths.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C1F520CBD88FCB7FDC4354A /* SessionHistoryScanner+Paths.swift */; };
 		49C2B204000000000001AABB /* SessionHistoryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C2B204000000000001AAAA /* SessionHistoryService.swift */; };
 		49C2B205000000000001AABB /* SessionResumeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C2B205000000000001AAAA /* SessionResumeTests.swift */; };
+		5D710001000000000001AABB /* LocalSkillModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C710001000000000001AAAA /* LocalSkillModels.swift */; };
+		5D710002000000000001AABB /* LocalSkillService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C710002000000000001AAAA /* LocalSkillService.swift */; };
+		5D710003000000000001AABB /* SkillStatsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C710003000000000001AAAA /* SkillStatsView.swift */; };
+		5D710004000000000001AABB /* LocalSkillScannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C710004000000000001AAAA /* LocalSkillScannerTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -365,6 +369,10 @@
 		5C1F520CBD88FCB7FDC4354A /* SessionHistoryScanner+Paths.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SessionHistoryScanner+Paths.swift"; sourceTree = "<group>"; };
 		49C2B204000000000001AAAA /* SessionHistoryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionHistoryService.swift; sourceTree = "<group>"; };
 		49C2B205000000000001AAAA /* SessionResumeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionResumeTests.swift; sourceTree = "<group>"; };
+		5C710001000000000001AAAA /* LocalSkillModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalSkillModels.swift; sourceTree = "<group>"; };
+		5C710002000000000001AAAA /* LocalSkillService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalSkillService.swift; sourceTree = "<group>"; };
+		5C710003000000000001AAAA /* SkillStatsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillStatsView.swift; sourceTree = "<group>"; };
+		5C710004000000000001AAAA /* LocalSkillScannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalSkillScannerTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -615,6 +623,8 @@
 				5C1F520CBD88FCB7FDC4354A /* SessionHistoryScanner+Paths.swift */,
 				5C8740CC45D18391F6F7489C /* SessionHistoryScanner+Antigravity.swift */,
 				5CE3FF343F7A87721EE7FAED /* SessionHistoryScanner+ClaudeAgy.swift */,
+				5C710001000000000001AAAA /* LocalSkillModels.swift */,
+				5C710002000000000001AAAA /* LocalSkillService.swift */,
 			);
 			path = Usage;
 			sourceTree = "<group>";
@@ -630,6 +640,7 @@
 				49C1B164000000000001AAAA /* ConversationStatsView.swift */,
 				49C1BA12000000000001AAAA /* CycleStatsView.swift */,
 				49C1BB02000000000001AAAA /* ProjectStatsView.swift */,
+				5C710003000000000001AAAA /* SkillStatsView.swift */,
 			);
 			path = Main;
 			sourceTree = "<group>";
@@ -692,6 +703,7 @@
 				49C2AA0B000000000001AAAA /* UsageSafeRebuildTests.swift */,
 				49C2AA0D000000000001AAAA /* UsageHistoryTestHarness.swift */,
 				49C2B205000000000001AAAA /* SessionResumeTests.swift */,
+				5C710004000000000001AAAA /* LocalSkillScannerTests.swift */,
 				49C1B3F2000000000001AAAA /* Fixtures */,
 			);
 			path = CCBarTests;
@@ -946,6 +958,7 @@
 				49C1B164000000000001AABB /* ConversationStatsView.swift in Sources */,
 				49C1BA12000000000001AABB /* CycleStatsView.swift in Sources */,
 				49C1BB02000000000001AABB /* ProjectStatsView.swift in Sources */,
+				5D710003000000000001AABB /* SkillStatsView.swift in Sources */,
 				49C1B165000000000001AABB /* ConversationModels.swift in Sources */,
 				49C1B166000000000001AABB /* ConversationAggregator.swift in Sources */,
 				49C1BB01000000000001AABB /* ProjectWorktreeResolver.swift in Sources */,
@@ -955,6 +968,8 @@
 				5D1F520CBD88FCB7FDC4354A /* SessionHistoryScanner+Paths.swift in Sources */,
 				5D8740CC45D18391F6F7489C /* SessionHistoryScanner+Antigravity.swift in Sources */,
 				5DE3FF343F7A87721EE7FAED /* SessionHistoryScanner+ClaudeAgy.swift in Sources */,
+				5D710001000000000001AABB /* LocalSkillModels.swift in Sources */,
+				5D710002000000000001AABB /* LocalSkillService.swift in Sources */,
 				49C1B168000000000001AABB /* ConversationRollupCache.swift in Sources */,
 				49C1B171000000000001AABB /* FloatingPanel.swift in Sources */,
 				49C1B172000000000001AABB /* FloatingContentView.swift in Sources */,
@@ -1009,6 +1024,7 @@
 				49C1BF0A000000000001AABB /* ConversationProjectResolverTests.swift in Sources */,
 				49C1BB03000000000001AABB /* ProjectUsageTests.swift in Sources */,
 				49C2B205000000000001AABB /* SessionResumeTests.swift in Sources */,
+				5D710004000000000001AABB /* LocalSkillScannerTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -348,6 +348,8 @@ enum StatsViewMode: Hashable, CaseIterable {
     case projects
     /// 额度：当前周期卡 + 额度变化时间线（原 Cycles 与 Timeline 合并）。
     case quota
+    /// 本机已安装 Skill 浏览与检索。
+    case skills
 
     /// 顶栏页面标题，与侧栏视图项同名。
     @MainActor
@@ -357,6 +359,7 @@ enum StatsViewMode: Hashable, CaseIterable {
         case .conversations: return tr("Conversations", "对话")
         case .projects: return tr("Projects", "项目")
         case .quota: return tr("Quota", "额度")
+        case .skills: return tr("Skills", "技能")
         }
     }
 }
@@ -475,6 +478,9 @@ struct StatsView: View {
                         }
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                case .skills:
+                    SkillStatsView(serviceFilter: serviceFilter)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 case .overview, .quota:
                     GeometryReader { proxy in
                         ScrollView {
@@ -500,7 +506,7 @@ struct StatsView: View {
         .onChange(of: viewMode) { _, mode in
             reconcileServiceFilter()
             // 离开滚动画布后清掉滚动状态，回到概览 / 额度时新画布从顶部开始。
-            if mode == .projects || mode == .conversations { canvasScrolled = false }
+            if mode == .projects || mode == .conversations || mode == .skills { canvasScrolled = false }
         }
         .onChange(of: granularity) { _, _ in reconcileRange() }
         .task(id: cursorHistoryRequest) {
@@ -509,11 +515,11 @@ struct StatsView: View {
         }
     }
 
-    /// 顶栏分隔线：对话 / 项目页下方是贴边的左右分栏，一直显示，与分栏竖线相接；
+    /// 顶栏分隔线：对话 / 项目 / 技能页下方是贴边的左右分栏，一直显示，与分栏竖线相接；
     /// 概览 / 额度页是卡片，静止时只靠间距与顶栏分开，内容滚到顶栏下方后才显示。
     private var showsTopBarDivider: Bool {
         switch viewMode {
-        case .conversations, .projects: return true
+        case .conversations, .projects, .skills: return true
         case .overview, .quota: return canvasScrolled
         }
     }
@@ -541,7 +547,7 @@ struct StatsView: View {
             overviewContent(canvasWidth: canvasWidth, canvasHeight: canvasHeight, isWide: isWide)
         case .quota:
             quotaContent(isWide: isWide)
-        case .conversations, .projects:
+        case .conversations, .projects, .skills:
             EmptyView()
         }
     }
@@ -793,6 +799,14 @@ struct StatsView: View {
                 ) {
                     viewMode = .quota
                 }
+                sidebarItem(
+                    english: "Skills",
+                    chinese: "技能",
+                    icon: "puzzlepiece.extension",
+                    active: viewMode == .skills
+                ) {
+                    viewMode = .skills
+                }
             }
 
             Spacer()
@@ -927,6 +941,39 @@ struct StatsView: View {
             .buttonStyle(.borderless)
             .frame(width: 26, height: 22)
             .help(tr("Refresh local usage", "刷新本机用量"))
+        case .skills:
+            SkillScanStatus(
+                count: matchingSkillCount,
+                isScanning: appState.localSkills.isScanning,
+                isEmpty: appState.localSkills.skills.isEmpty,
+                lastScanAt: appState.localSkills.lastScanAt
+            )
+            .font(.system(size: 11.5))
+            .monospacedDigit()
+            .lineLimit(1)
+
+            Button {
+                Task { await appState.localSkills.refreshNow() }
+            } label: {
+                if appState.localSkills.isScanning {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                }
+            }
+            .buttonStyle(.borderless)
+            .frame(width: 26, height: 22)
+            .pointingHandCursor()
+            .help(tr("Rescan local skills", "重新扫描本机技能"))
+        }
+    }
+
+    private var matchingSkillCount: Int {
+        let app = serviceFilter.usageApp
+        return appState.localSkills.skills.reduce(into: 0) { count, skill in
+            if skill.matches(usageApp: app) {
+                count += 1
+            }
         }
     }
 
@@ -2414,7 +2461,7 @@ struct StatsTopBar<Detail: View>: View {
     @Binding var customTo: Date
     @ViewBuilder var detail: () -> Detail
 
-    private var showsRangeControls: Bool { mode != .quota }
+    private var showsRangeControls: Bool { mode != .quota && mode != .skills }
 
     var body: some View {
         ViewThatFits(in: .horizontal) {

@@ -35,6 +35,9 @@ final class MainWindowSessionState {
     var conversationSort: ConversationQuerySort = .recent
     var conversationProjectKey: String?
     var projectSort: ProjectListSort
+    var skillScopeFilter: LocalSkillScopeFilter = .all
+    var skillSourceFilter: String?
+    var skillSort: LocalSkillSort = .name
     var settingsCategory: SettingsCategory = .services
     private var projectRankMetric: StatsRankMetric
 
@@ -323,6 +326,7 @@ final class AppState {
 
     let usageService = UsageService(localUsageApps: { SettingsStore.shared.enabledLocalUsageApps })
     let sessionHistory = SessionHistoryService()
+    let localSkills = LocalSkillService()
     private let scheduler = Scheduler()
     private var codexAlertEntryVersion: UInt64 = 0
     private var primaryAlertEntryVersions: [QuotaApp: UInt64] = [:]
@@ -526,6 +530,7 @@ final class AppState {
         )
         // 启动后台触发一次 JSONL 扫描与历史会话索引，让今日 cost 与会话恢复列表立刻更新（不阻塞 bootstrap）
         sessionHistory.refreshInBackground(minAge: 0)
+        localSkills.refreshInBackground(minAge: 0)
         Task {
             await usageService.scanNow()
             await refreshGoogleAPILocalUsageIfNeeded()
@@ -575,6 +580,7 @@ final class AppState {
             await self.usageService.scanNow()
             await self.refreshGoogleAPILocalUsageIfNeeded()
             await self.sessionHistory.refreshNow()
+            await self.localSkills.refreshNow()
             await self.refreshServiceStatus()
         }
         refreshInFlight = task
