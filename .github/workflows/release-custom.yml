@@ -1,0 +1,161 @@
+name: Release Custom
+
+# 定制版自动打包发布（ad-hoc 签名，无需 Apple 开发者证书或上游 Sparkle 私钥）
+on:
+  push:
+    tags: ['v*-custom*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '发布 Tag（留空则按 MARKETING_VERSION 自动递增，如 v1.1.46-custom1）'
+        required: false
+        type: string
+
+concurrency:
+  group: release-custom-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: 构建并发布定制版 DMG
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 解析版本号与发布 Tag
+        id: meta
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          marketing_ver=$(grep -m1 'MARKETING_VERSION =' ccbar.xcodeproj/project.pbxproj | sed -E 's/.*MARKETING_VERSION = ([^;]+);.*/\1/' | tr -d '[:space:]')
+          if [[ -z "$marketing_ver" ]]; then
+            echo "无法从 project.pbxproj 解析 MARKETING_VERSION" >&2
+            exit 1
+          fi
+
+          if [[ "$REF_TYPE" == "tag" ]]; then
+            tag="$REF_NAME"
+          elif [[ -n "${INPUT_TAG:-}" ]]; then
+            tag="$INPUT_TAG"
+          else
+            existing=$(
+              {
+                git tag -l "v${marketing_ver}-custom*" || true
+                gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json tagName --jq '.[].tagName' 2>/dev/null || true
+              } | sed -nE "s/^v${marketing_ver//./\\.}-custom([0-9]+)$/\1/p" | sort -nu | tail -n 1
+            )
+            next_n=$(( ${existing:-0} + 1 ))
+            tag="v${marketing_ver}-custom${next_n}"
+          fi
+
+          prev_tag=$(
+            gh release list --repo "$GITHUB_REPOSITORY" --limit 20 --json tagName,isDraft \
+              --jq '.[] | select(.isDraft == false) | .tagName' 2>/dev/null \
+              | grep -v "^${tag}$" | head -n 1 || true
+          )
+
+          ver_no_v="${tag#v}"
+          echo "marketing_ver=$marketing_ver" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "ver_no_v=$ver_no_v" >> "$GITHUB_OUTPUT"
+          echo "prev_tag=$prev_tag" >> "$GITHUB_OUTPUT"
+          echo "本次发布 Tag: $tag (基线 MARKETING_VERSION=$marketing_ver, 上一版=${prev_tag:-无})"
+
+      - name: 选择最新 Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: 缓存 Swift 包与增量构建
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/SourcePackages
+            build/Build
+          key: ${{ runner.os }}-custom-release-${{ hashFiles('ccbar.xcodeproj/project.pbxproj', '**/*.swift', 'ccbar.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-custom-release-
+
+      - name: 构建并打包 (ad-hoc 签名)
+        env:
+          # 使用内置 Sparkle 公钥以保留上游在线价格表验签能力；App 内更新已由 CCBarCustomBuild 禁用
+          REPO_SPARKLE_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
+          VER_NO_V: ${{ steps.meta.outputs.ver_no_v }}
+        run: |
+          set -euo pipefail
+          export SPARKLE_PUBLIC_ED_KEY="${REPO_SPARKLE_KEY:-ZBP7TIEjReojbAckWVPq4ShHcG1o9+nAEm4hfsfhj98=}"
+          ./scripts/build.sh
+          cp dist/CCBar.dmg "dist/CCBar-${VER_NO_V}-arm64.dmg"
+          cp dist/CCBar.app.zip "dist/CCBar-${VER_NO_V}-arm64.zip"
+
+      - name: 生成 Release 说明
+        shell: bash
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          VER_NO_V: ${{ steps.meta.outputs.ver_no_v }}
+          MARKETING_VER: ${{ steps.meta.outputs.marketing_ver }}
+          PREV_TAG: ${{ steps.meta.outputs.prev_tag }}
+        run: |
+          set -euo pipefail
+          {
+            printf '基于 `nanvon/cc-bar` `v%s` 构建的个人定制版（`%s`）。\n\n' "$MARKETING_VER" "$TAG"
+
+            if [[ -n "$PREV_TAG" ]] && git rev-parse -q --verify "refs/tags/${PREV_TAG}" >/dev/null 2>&1; then
+              printf '### 本次变更（相对 `%s`）\n\n' "$PREV_TAG"
+              git log --no-merges --pretty=format:'- `%h` %s' "${PREV_TAG}..HEAD" | head -n 30
+              printf '\n\n'
+            fi
+
+            upstream_notes="release-notes/v${MARKETING_VER}.md"
+            if [[ -s "$upstream_notes" ]]; then
+              printf '### 上游 `v%s` 更新摘要\n\n' "$MARKETING_VER"
+              cat "$upstream_notes"
+              printf '\n\n'
+            fi
+
+            printf '### 一键安装 / 升级（Apple Silicon Mac，macOS 14+）\n\n'
+            printf '在终端执行以下命令即可自动下载最新 DMG、替换旧版、清除 Gatekeeper 隔离标记并重新启动：\n\n'
+            printf '```bash\ncurl -fsSL https://raw.githubusercontent.com/tangke612/cc-bar-custom/custom/scripts/install-custom.sh | bash\n```\n\n'
+            printf '手动安装：下载 `CCBar.dmg`（或 `CCBar-%s-arm64.dmg`），将 `CCBar` 拖入「应用程序」，首次打开前执行一次：\n\n' "$VER_NO_V"
+            printf '```bash\nxattr -cr /Applications/CCBar.app && open /Applications/CCBar.app\n```\n'
+          } > dist/release-body.md
+
+      - name: 发布到 GitHub Releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VER_NO_V: ${{ steps.meta.outputs.ver_no_v }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+              dist/CCBar.dmg \
+              "dist/CCBar-${VER_NO_V}-arm64.dmg" \
+              "dist/CCBar-${VER_NO_V}-arm64.zip"
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" \
+              --notes-file dist/release-body.md \
+              --draft=false \
+              --latest
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$TAG" \
+              --notes-file dist/release-body.md \
+              --draft \
+              dist/CCBar.dmg \
+              "dist/CCBar-${VER_NO_V}-arm64.dmg" \
+              "dist/CCBar-${VER_NO_V}-arm64.zip"
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          fi

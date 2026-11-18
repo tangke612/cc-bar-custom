@@ -1,0 +1,194 @@
+name: Sync Upstream
+
+# 定时检查 nanvon/cc-bar 上游更新：
+# 1. 无更新时在轻量 ubuntu 节点 3 秒退出，不消耗 macOS 构建时长；
+# 2. 有更新且无代码冲突时，在 macOS 编译通过后自动推送到 custom 并发布新版定制 DMG；
+# 3. 若发生代码冲突或编译失败，不污染 custom 分支，自动创建/更新 Issue 提醒人工处理。
+on:
+  schedule:
+    # 每天北京时间 02:15 与 14:15 自动检查一次
+    - cron: '15 6,18 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  check:
+    name: 检查上游更新
+    runs-on: ubuntu-latest
+    outputs:
+      has_updates: ${{ steps.probe.outputs.has_updates }}
+      clean_merge: ${{ steps.probe.outputs.clean_merge }}
+      upstream_sha: ${{ steps.probe.outputs.upstream_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: custom
+          fetch-depth: 0
+
+      - name: 对比 nanvon/cc-bar/main
+        id: probe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "tangke612"
+          git config user.email "65268039+tangke612@users.noreply.github.com"
+          git remote add upstream https://github.com/nanvon/cc-bar.git
+          git fetch upstream main --tags
+
+          upstream_sha=$(git rev-parse --short upstream/main)
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "custom 分支已包含上游最新提交 ($upstream_sha)，无需同步。"
+            echo "has_updates=false" >> "$GITHUB_OUTPUT"
+            echo "clean_merge=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "发现上游新提交："
+          git log --oneline HEAD..upstream/main
+          echo "has_updates=true" >> "$GITHUB_OUTPUT"
+
+          if git merge --no-commit --no-ff upstream/main; then
+            echo "预合并无冲突，交由 macOS 节点验证编译并发布。"
+            git merge --abort || git reset --hard HEAD
+            echo "clean_merge=true" >> "$GITHUB_OUTPUT"
+          else
+            conflicts=$(git diff --name-only --diff-filter=U || true)
+            commits=$(git log --oneline HEAD..upstream/main)
+            git merge --abort || git reset --hard HEAD
+            echo "clean_merge=false" >> "$GITHUB_OUTPUT"
+
+            title="[Upstream Sync] 上游更新 (${upstream_sha}) 存在合并冲突"
+            body=$(printf '检测到 `nanvon/cc-bar` 新提交，自动合并到 `custom` 时出现冲突，未修改 `custom` 分支。\n\n### 上游新增提交\n```\n%s\n```\n\n### 冲突文件\n```\n%s\n```\n' "$commits" "$conflicts")
+            existing_issue=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "[Upstream Sync] in:title" --json number --jq '.[0].number // empty')
+            if [[ -n "$existing_issue" ]]; then
+              gh issue comment "$existing_issue" --repo "$GITHUB_REPOSITORY" --body "$body"
+            else
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+            fi
+            exit 1
+          fi
+
+  merge-build-release:
+    name: 合并验证并发布新版安装包
+    needs: check
+    if: needs.check.outputs.has_updates == 'true' && needs.check.outputs.clean_merge == 'true'
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: custom
+          fetch-depth: 0
+
+      - name: 合并上游 nanvon/cc-bar
+        id: merge
+        run: |
+          set -euo pipefail
+          git config user.name "tangke612"
+          git config user.email "65268039+tangke612@users.noreply.github.com"
+          git remote add upstream https://github.com/nanvon/cc-bar.git
+          git fetch upstream main --tags
+
+          upstream_desc=$(git describe --tags --exact-match upstream/main 2>/dev/null || git rev-parse --short upstream/main)
+          git merge --no-ff upstream/main -m "chore(custom): 自动合并上游 nanvon/cc-bar ${upstream_desc}"
+
+          marketing_ver=$(grep -m1 'MARKETING_VERSION =' ccbar.xcodeproj/project.pbxproj | sed -E 's/.*MARKETING_VERSION = ([^;]+);.*/\1/' | tr -d '[:space:]')
+          echo "upstream_desc=$upstream_desc" >> "$GITHUB_OUTPUT"
+          echo "marketing_ver=$marketing_ver" >> "$GITHUB_OUTPUT"
+
+      - name: 选择最新 Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: 缓存 Swift 包与增量构建
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/SourcePackages
+            build/Build
+          key: ${{ runner.os }}-custom-release-${{ hashFiles('ccbar.xcodeproj/project.pbxproj', '**/*.swift', 'ccbar.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-custom-release-
+
+      - name: 编译校验并构建安装包
+        id: build
+        env:
+          REPO_SPARKLE_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
+        run: |
+          set -euo pipefail
+          export SPARKLE_PUBLIC_ED_KEY="${REPO_SPARKLE_KEY:-ZBP7TIEjReojbAckWVPq4ShHcG1o9+nAEm4hfsfhj98=}"
+          ./scripts/build.sh
+
+      - name: 编译失败时创建提醒 Issue
+        if: failure() && steps.build.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_DESC: ${{ steps.merge.outputs.upstream_desc }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="[Upstream Sync] 上游 ${UPSTREAM_DESC} 合并后编译失败"
+          body="上游 \`nanvon/cc-bar\` (\`${UPSTREAM_DESC}\`) 虽无文本冲突，但合并后 Xcode 构建未通过，\`custom\` 分支保持原状未推送。详情见构建日志：${RUN_URL}"
+          existing_issue=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "[Upstream Sync] in:title" --json number --jq '.[0].number // empty')
+          if [[ -n "$existing_issue" ]]; then
+            gh issue comment "$existing_issue" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
+
+      - name: 推送合并后的 custom 分支并发布新 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MARKETING_VER: ${{ steps.merge.outputs.marketing_ver }}
+          UPSTREAM_DESC: ${{ steps.merge.outputs.upstream_desc }}
+        run: |
+          set -euo pipefail
+          git push origin HEAD:custom
+          new_sha=$(git rev-parse HEAD)
+
+          prev_tag=$(
+            gh release list --repo "$GITHUB_REPOSITORY" --limit 20 --json tagName,isDraft \
+              --jq '.[] | select(.isDraft == false) | .tagName' 2>/dev/null | head -n 1 || true
+          )
+          existing=$(
+            {
+              git tag -l "v${MARKETING_VER}-custom*" || true
+              gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json tagName --jq '.[].tagName' 2>/dev/null || true
+            } | sed -nE "s/^v${MARKETING_VER//./\\.}-custom([0-9]+)$/\1/p" | sort -nu | tail -n 1
+          )
+          next_n=$(( ${existing:-0} + 1 ))
+          tag="v${MARKETING_VER}-custom${next_n}"
+          ver_no_v="${tag#v}"
+
+          cp dist/CCBar.dmg "dist/CCBar-${ver_no_v}-arm64.dmg"
+          cp dist/CCBar.app.zip "dist/CCBar-${ver_no_v}-arm64.zip"
+
+          {
+            printf '自动同步上游 `nanvon/cc-bar` `%s` 构建的个人定制版（`%s`）。\n\n' "$UPSTREAM_DESC" "$tag"
+            if [[ -s "release-notes/v${MARKETING_VER}.md" ]]; then
+              printf '### 上游 `v%s` 更新摘要\n\n' "$MARKETING_VER"
+              cat "release-notes/v${MARKETING_VER}.md"
+              printf '\n\n'
+            fi
+            printf '### 一键安装 / 升级\n\n```bash\ncurl -fsSL https://raw.githubusercontent.com/tangke612/cc-bar-custom/custom/scripts/install-custom.sh | bash\n```\n'
+          } > dist/release-body.md
+
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+            --target "$new_sha" \
+            --title "$tag" \
+            --notes-file dist/release-body.md \
+            --draft \
+            dist/CCBar.dmg \
+            "dist/CCBar-${ver_no_v}-arm64.dmg" \
+            "dist/CCBar-${ver_no_v}-arm64.zip"
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
