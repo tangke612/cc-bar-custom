@@ -131,104 +131,21 @@ jobs:
             --entitlements build/ci/test-entitlements.plist "$app"
           codesign --verify --strict "$app"
 
-      # artifact 不保留可执行位，先打成 tar 再由测试分片解包，避免 App 主程序变成 644 无法启动。
-      - name: 打包测试产物
-        run: tar -czf build/ci/test-products.tar.gz -C build/ci/Build Products
-
-      - name: 上传测试产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-products
-          path: build/ci/test-products.tar.gz
-          if-no-files-found: error
-          retention-days: 1
-
-  test:
-    name: 测试 shard ${{ matrix.shard }}
-    needs: [changes, build]
-    if: needs.changes.outputs.code == 'true' && needs.build.result == 'success'
-    runs-on: macos-26
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: 选择最新 Xcode
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: latest-stable
-
-      - name: 下载测试产物
-        uses: actions/download-artifact@v4
-        with:
-          name: test-products
-          path: build/ci
-
-      - name: 解包测试产物
+      # 直接在同一台 macos-26 机器上开启多进程并行执行全量 CCBarTests（含 CloudSyncTests），
+      # 省去跨机器产物上传/下载，并避免 GitHub 托管 macOS arm64 多并发排队饥饿取消。
+      - name: 运行全量单元测试
         run: |
-          mkdir -p build/ci/Build
-          tar -xzf build/ci/test-products.tar.gz -C build/ci/Build
-
-      - name: 运行本分片测试
-        env:
-          SHARD: ${{ matrix.shard }}
-        run: |
-          set -euo pipefail
-          # 前两个分片保留原有负载分配，第三个分片自动运行剩余所有测试（包括新测试类）。
-          shard1=(
-            QuotaParsingTests
-            PiJSONLScannerTests
-            UpdateCheckerTests
-            CursorUsageFetcherTests
-            StatsOverviewModelTests
-            QuotaPersistenceCoordinatorTests
-          )
-          shard2=(
-            UsageSafeRebuildTests
-            OpencodeScannerTests
-            DshSessionScannerTests
-            AntigravityCredentialsTests
-            AntigravityDesktopQuotaTests
-            AntigravityScannerTests
-            DshZstdFrameScannerTests
-            OpenCodeGoQuotaTests
-            RedactTests
-            ConversationProjectResolverTests
-            DshPricingTests
-            ImportedCodexStoreTests
-            UsageEquivalenceTests
-          )
-          test_args=()
-          case "$SHARD" in
-            1)
-              for test_class in "${shard1[@]}"; do
-                test_args+=("-only-testing:CCBarTests/$test_class")
-              done
-              ;;
-            2)
-              for test_class in "${shard2[@]}"; do
-                test_args+=("-only-testing:CCBarTests/$test_class")
-              done
-              ;;
-            3)
-              for test_class in "${shard1[@]}" "${shard2[@]}"; do
-                test_args+=("-skip-testing:CCBarTests/$test_class")
-              done
-              ;;
-            *) echo "未知测试分片: $SHARD" >&2; exit 1 ;;
-          esac
+          set -o pipefail
           mkdir -p build/ci/TestResults
           xctestrun=$(find build/ci/Build/Products -maxdepth 1 -name '*.xctestrun' -print -quit)
           if ! xcodebuild \
             -xctestrun "$xctestrun" \
             -destination 'platform=macOS' \
             -parallel-testing-enabled YES \
-            -resultBundlePath "build/ci/TestResults/shard-${{ matrix.shard }}.xcresult" \
-            "${test_args[@]}" \
+            -only-testing:CCBarTests \
+            -resultBundlePath "build/ci/TestResults/CCBarTests.xcresult" \
             test-without-building 2>&1 | tee build/ci/xctest.log; then
-            grep -E "error:|failed -|Test Case .* failed" build/ci/xctest.log | head -n 25 | while IFS= read -r line; do
+            grep -E "error:|failed -|Test Case .* failed|Restarting after unexpected exit" build/ci/xctest.log | head -n 30 | while IFS= read -r line; do
               echo "::error::${line}"
             done
             exit 65
@@ -238,16 +155,16 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-${{ matrix.shard }}
+          name: test-results
           path: build/ci/TestResults
           if-no-files-found: ignore
           retention-days: 7
 
   ci-status:
     name: CI status
-    # 始终运行：docs-only 时 build/test 会 skip，这个 job 仍然成功，作为唯一必填检查。
+    # 始终运行：docs-only 时 build 会 skip，这个 job 仍然成功，作为唯一必填检查。
     if: always()
-    needs: [changes, build, test]
+    needs: [changes, build]
     runs-on: ubuntu-latest
     steps:
       - name: 汇总必需 job 结果
@@ -255,14 +172,12 @@ jobs:
           CHANGES: ${{ needs.changes.result }}
           CODE: ${{ needs.changes.outputs.code }}
           BUILD: ${{ needs.build.result }}
-          TEST: ${{ needs.test.result }}
         run: |
           set -euo pipefail
-          echo "changes=$CHANGES code=$CODE build=$BUILD test=$TEST"
+          echo "changes=$CHANGES code=$CODE build=$BUILD"
           [ "$CHANGES" = "success" ] || exit 1
           if [ "$CODE" = "true" ]; then
             [ "$BUILD" = "success" ] || exit 1
-            [ "$TEST" = "success" ] || exit 1
           else
             echo "只改了文档，跳过 macOS 构建与测试"
           fi
