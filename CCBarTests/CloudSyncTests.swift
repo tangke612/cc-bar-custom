@@ -145,7 +145,7 @@ final class CloudSyncTests: XCTestCase {
         )
 
         let usageAgg = UsageAggregator()
-        usageAgg.loadLocal([localDayBucket])
+        usageAgg.load(from: [localDayBucket])
 
         let convAgg = ConversationAggregator(worktreeResolver: ProjectWorktreeResolver(home: macBHome.path))
         convAgg.load(infos: [localInfo], buckets: [localConvBucket])
@@ -173,8 +173,8 @@ final class CloudSyncTests: XCTestCase {
 
         // 2) Display totals include both local and synced billing
         let nextDay = calendar.date(byAdding: .day, value: 1, to: targetDay)!
-        let codexTotals = usageAgg.totals(for: .codex, from: targetDay, to: nextDay)
-        let claudeTotals = usageAgg.totals(for: .claude, from: targetDay, to: nextDay)
+        let codexTotals = usageAgg.totals(app: .codex, from: targetDay, to: nextDay)
+        let claudeTotals = usageAgg.totals(app: .claude, from: targetDay, to: nextDay)
         XCTAssertEqual(codexTotals.inputTokens, 1_200)
         XCTAssertEqual(codexTotals.costUSD, Decimal(string: "1.70")!)
         XCTAssertEqual(claudeTotals.inputTokens, 2_300)
@@ -280,7 +280,7 @@ final class CloudSyncTests: XCTestCase {
         )
 
         let usageAgg = UsageAggregator()
-        usageAgg.loadLocal([
+        usageAgg.load(from: [
             UsageBucket(
                 app: .codex, model: "gpt-5", speed: .standard, day: targetDay,
                 inputTokens: 2_000, outputTokens: 800, cacheReadTokens: 0, cacheCreationTokens: 0,
@@ -316,7 +316,7 @@ final class CloudSyncTests: XCTestCase {
         )
 
         // Effective totals: dup-1 (1000/400/$1.00) + cont-2 (1600/700/$1.80) = 2600/1100/$2.80
-        let combinedTotals = usageAgg.totals(for: .codex, from: targetDay, to: nextDay)
+        let combinedTotals = usageAgg.totals(app: .codex, from: targetDay, to: nextDay)
         XCTAssertEqual(combinedTotals.inputTokens, 2_600)
         XCTAssertEqual(combinedTotals.outputTokens, 1_100)
         XCTAssertEqual(combinedTotals.costUSD, Decimal(string: "2.80")!)
@@ -477,7 +477,7 @@ final class CloudSyncTests: XCTestCase {
 
         // Seed Mac A local state
         let localKey = "codex:local-e2e"
-        appState.usageService.aggregator.loadLocal([
+        appState.usageService.aggregator.load(from: [
             UsageBucket(
                 app: .codex, model: "gpt-5", speed: .standard, day: targetDay,
                 inputTokens: 500, outputTokens: 200, cacheReadTokens: 0, cacheCreationTokens: 0,
@@ -520,7 +520,7 @@ final class CloudSyncTests: XCTestCase {
         XCTAssertEqual(exportedLocalShard.conversationInfos.map(\.key), [localKey], "Local shard must NEVER re-export peer conversations")
 
         XCTAssertEqual(
-            appState.usageService.aggregator.totals(for: .claude, from: targetDay, to: nextDay).costUSD,
+            appState.usageService.aggregator.totals(app: .claude, from: targetDay, to: nextDay).costUSD,
             Decimal(string: "2.25")!
         )
         XCTAssertEqual(appState.usageService.conversationAggregator.syncedDeviceName(forKey: peerKey), "Mac B")
@@ -529,17 +529,17 @@ final class CloudSyncTests: XCTestCase {
         await syncService.removePeerShard(deviceID: "peer-mac-b", appState: appState)
         XCTAssertFalse(FileManager.default.fileExists(atPath: peerFileURL.path))
         XCTAssertTrue(syncService.peerStatuses.isEmpty)
-        XCTAssertEqual(appState.usageService.aggregator.totals(for: .claude, from: targetDay, to: nextDay).totalTokens, 0)
+        XCTAssertEqual(appState.usageService.aggregator.totals(app: .claude, from: targetDay, to: nextDay).totalTokens, 0)
 
         // 3) Re-add peer shard, sync, then disable cloud sync -> clears in-memory overlay while keeping disk shard intact
         try JSONEncoder().encode(peerShard).write(to: peerFileURL, options: .atomic)
         await syncService.syncNow(appState: appState)
-        XCTAssertEqual(appState.usageService.aggregator.totals(for: .claude, from: targetDay, to: nextDay).inputTokens, 900)
+        XCTAssertEqual(appState.usageService.aggregator.totals(app: .claude, from: targetDay, to: nextDay).inputTokens, 900)
 
         settings.cloudSyncEnabled = false
         await syncService.syncNow(appState: appState)
-        XCTAssertEqual(appState.usageService.aggregator.totals(for: .claude, from: targetDay, to: nextDay).totalTokens, 0)
-        XCTAssertEqual(appState.usageService.aggregator.totals(for: .codex, from: targetDay, to: nextDay).inputTokens, 500)
+        XCTAssertEqual(appState.usageService.aggregator.totals(app: .claude, from: targetDay, to: nextDay).totalTokens, 0)
+        XCTAssertEqual(appState.usageService.aggregator.totals(app: .codex, from: targetDay, to: nextDay).inputTokens, 500)
         XCTAssertTrue(FileManager.default.fileExists(atPath: peerFileURL.path), "Disabling sync must not delete cloud files")
     }
 
