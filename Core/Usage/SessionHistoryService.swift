@@ -536,10 +536,15 @@ nonisolated enum SessionHistoryScanner {
 final class SessionHistoryService {
     private(set) var records: [SessionHistoryRecord] = []
     private(set) var recordsByKey: [String: SessionHistoryRecord] = [:]
+    private(set) var localRecords: [SessionHistoryRecord] = []
     private(set) var isIndexing = false
     private(set) var lastIndexedAt: Date?
     private(set) var revision: UInt64 = 0
+    private(set) var localRevision: UInt64 = 0
 
+    @ObservationIgnored private var syncedRecords: [SessionHistoryRecord] = []
+    /// 判断某个 `ConversationInfo.key` 是否仅来自其他同步设备（本机无日志档案）。
+    @ObservationIgnored var isRemoteOnlyConversation: ((String) -> Bool)?
     @ObservationIgnored private var cacheState: SessionHistoryCacheState?
     @ObservationIgnored private var didLoadDiskCache = false
     @ObservationIgnored private var activeScanTask: Task<Void, Never>?
@@ -567,7 +572,7 @@ final class SessionHistoryService {
 
     /// 非阻塞触发后台增量扫描（节流间隔默认 3 秒，强制刷新传 `minAge: 0`）。
     func refreshInBackground(minAge: TimeInterval = 3.0) {
-        if let lastIndexedAt, Date().timeIntervalSince(lastIndexedAt) < minAge, !records.isEmpty {
+        if let lastIndexedAt, Date().timeIntervalSince(lastIndexedAt) < minAge, !localRecords.isEmpty {
             return
         }
         Task { await refreshNow() }
@@ -608,7 +613,7 @@ final class SessionHistoryService {
                 }.value
 
                 self.cacheState = output.state
-                self.applyRecords(output.records)
+                self.applyLocalRecords(output.records)
                 self.lastIndexedAt = Date()
             } while self.queuedRescan
         }
@@ -616,12 +621,43 @@ final class SessionHistoryService {
         await runner.value
     }
 
-    private func applyRecords(_ newRecords: [SessionHistoryRecord]) {
-        guard records != newRecords else { return }
-        records = newRecords
+    private func applyLocalRecords(_ newLocalRecords: [SessionHistoryRecord]) {
+        guard localRecords != newLocalRecords else { return }
+        localRecords = newLocalRecords
+        localRevision &+= 1
+        rebuildMergedRecords()
+    }
+
+    /// 替换其他设备云同步进来的会话摘要记录（仅存于内存，不写 `session-history-cache-v1.json`）。
+    func replaceSyncedRecords(_ newSyncedRecords: [SessionHistoryRecord]) {
+        guard syncedRecords != newSyncedRecords else { return }
+        syncedRecords = newSyncedRecords
+        rebuildMergedRecords()
+    }
+
+    private func rebuildMergedRecords() {
+        let merged: [SessionHistoryRecord]
+        if syncedRecords.isEmpty {
+            merged = localRecords
+        } else {
+            let localKeys = Set(localRecords.map(\.key))
+            var combined = localRecords
+            combined.reserveCapacity(localRecords.count + syncedRecords.count)
+            for synced in syncedRecords where !localKeys.contains(synced.key) {
+                combined.append(synced)
+            }
+            combined.sort { lhs, rhs in
+                if lhs.lastActiveAt == rhs.lastActiveAt { return lhs.key < rhs.key }
+                return lhs.lastActiveAt > rhs.lastActiveAt
+            }
+            merged = combined
+        }
+
+        guard records != merged else { return }
+        records = merged
         var map: [String: SessionHistoryRecord] = [:]
-        map.reserveCapacity(newRecords.count)
-        for record in newRecords {
+        map.reserveCapacity(merged.count)
+        for record in merged {
             map[record.key] = record
         }
         recordsByKey = map
@@ -651,9 +687,14 @@ final class SessionHistoryService {
     }
 
     /// 供某个 `ConversationInfo` 构造一键恢复命令（优先采用深度还原过 cwd 与 CLI/桌面端来源的索引记录）。
+    /// 对仅存在于其他同步设备的远端对话返回 nil，避免生成本机无法执行的无效恢复命令。
     func resumeCommand(for info: ConversationInfo) -> SessionResumeCommand? {
         if let indexed = record(for: info) {
+            guard !indexed.isRemoteSynced else { return nil }
             return indexed.resumeCommand
+        }
+        if isRemoteOnlyConversation?(info.key) == true {
+            return nil
         }
         switch info.app {
         case .codex:

@@ -7,8 +7,14 @@ import Observation
 final class ConversationAggregator {
     private var infos: [String: ConversationInfo] = [:]
     private var buckets: [BucketKey: ConversationUsageBucket] = [:]
+    private var syncedInfos: [String: ConversationInfo] = [:]
+    private var syncedBuckets: [BucketKey: ConversationUsageBucket] = [:]
+    private var syncedDeviceNames: [String: String] = [:]
     private(set) var revision: UInt64 = 0
+    /// 仅在本地对话分区变化时递增，供云同步判断是否需要导出或重算去重残差。
+    private(set) var localRevision: UInt64 = 0
 
+    @ObservationIgnored private var cachedEffective: (infos: [String: ConversationInfo], buckets: [BucketKey: ConversationUsageBucket])?
     @ObservationIgnored private var cachedQuery: (request: ConversationQueryRequest, result: ConversationQueryResult)?
     @ObservationIgnored private var cachedDetail: (revision: UInt64, key: String, metric: StatsRankMetric, detail: ConversationDetail)?
     @ObservationIgnored private var cachedOverview: (request: ConversationOverviewRequest, result: ConversationOverviewResult)?
@@ -65,13 +71,14 @@ final class ConversationAggregator {
         self.worktreeResolver = worktreeResolver
     }
 
-    var isEmpty: Bool { buckets.isEmpty }
+    var isEmpty: Bool { buckets.isEmpty && syncedBuckets.isEmpty }
 
     func load(infos: [ConversationInfo], buckets: [ConversationUsageBucket]) {
         self.infos = Dictionary(uniqueKeysWithValues: infos.map { ($0.key, $0) })
         self.buckets = Dictionary(uniqueKeysWithValues: buckets.map {
             (BucketKey(conversationKey: $0.conversationKey, day: $0.day, model: $0.model, speed: $0.speed), $0)
         })
+        localRevision &+= 1
         markChanged()
     }
 
@@ -148,7 +155,10 @@ final class ConversationAggregator {
             changed = true
         }
 
-        if changed { markChanged() }
+        if changed {
+            localRevision &+= 1
+            markChanged()
+        }
         return changed
     }
 
@@ -184,12 +194,124 @@ final class ConversationAggregator {
 
         infos = keptInfos
         buckets = keptBuckets
-        if changed { markChanged() }
+        if changed {
+            localRevision &+= 1
+            markChanged()
+        }
         return changed
     }
 
+    /// 替换其他设备通过云同步合入的净增量对话档案与桶；仅作用于查询展示，绝不进入 `snapshot()` 持久化。
+    func replaceSynced(
+        infos newInfos: [ConversationInfo],
+        buckets newBuckets: [ConversationUsageBucket],
+        deviceNames: [String: String]
+    ) {
+        var nextInfos: [String: ConversationInfo] = [:]
+        nextInfos.reserveCapacity(newInfos.count)
+        for info in newInfos {
+            nextInfos[info.key] = info
+        }
+
+        var nextBuckets: [BucketKey: ConversationUsageBucket] = [:]
+        nextBuckets.reserveCapacity(newBuckets.count)
+        for bucket in newBuckets {
+            let key = BucketKey(
+                conversationKey: bucket.conversationKey,
+                day: bucket.day,
+                model: bucket.model,
+                speed: bucket.speed
+            )
+            if let existing = nextBuckets[key] {
+                nextBuckets[key] = Self.sumConversationBuckets(existing, bucket)
+            } else {
+                nextBuckets[key] = bucket
+            }
+        }
+
+        guard nextInfos != syncedInfos || nextBuckets != syncedBuckets || deviceNames != syncedDeviceNames else {
+            return
+        }
+        syncedInfos = nextInfos
+        syncedBuckets = nextBuckets
+        syncedDeviceNames = deviceNames
+        markChanged()
+    }
+
+    /// 若该对话仅存在于其他同步设备（本机无对应日志档案），返回来源设备名称；本机已有档案时返回 nil。
+    func syncedDeviceName(forKey rawKey: String) -> String? {
+        _ = revision
+        guard !syncedDeviceNames.isEmpty else { return nil }
+        let rootKey = subtaskGrouping().rootKey(rawKey)
+        guard infos[rootKey] == nil, infos[rawKey] == nil else { return nil }
+        return syncedDeviceNames[rootKey] ?? syncedDeviceNames[rawKey]
+    }
+
+    /// 仅返回纯本机对话档案与桶，供 `UsageSnapshotStore` 持久化与一致性校验使用。
     func snapshot() -> (infos: [ConversationInfo], buckets: [ConversationUsageBucket]) {
         (Array(infos.values), Array(buckets.values))
+    }
+
+    private func effectiveData() -> (infos: [String: ConversationInfo], buckets: [BucketKey: ConversationUsageBucket]) {
+        _ = revision
+        if let cachedEffective { return cachedEffective }
+        if syncedInfos.isEmpty && syncedBuckets.isEmpty {
+            let direct = (infos: infos, buckets: buckets)
+            cachedEffective = direct
+            return direct
+        }
+
+        var mergedInfos = infos
+        for (key, peerInfo) in syncedInfos {
+            if var localInfo = mergedInfos[key] {
+                localInfo.firstAt = min(localInfo.firstAt, peerInfo.firstAt)
+                localInfo.lastAt = max(localInfo.lastAt, peerInfo.lastAt)
+                if (localInfo.title ?? "").isEmpty, let title = peerInfo.title, !title.isEmpty {
+                    localInfo.title = title
+                }
+                if localInfo.gitBranch == nil { localInfo.gitBranch = peerInfo.gitBranch }
+                localInfo.includesSubtasks = localInfo.includesSubtasks || peerInfo.includesSubtasks
+                localInfo.cacheCreationAvailable = localInfo.cacheCreationAvailable || peerInfo.cacheCreationAvailable
+                mergedInfos[key] = localInfo
+            } else {
+                mergedInfos[key] = peerInfo
+            }
+        }
+
+        var mergedBuckets = buckets
+        for (key, peerBucket) in syncedBuckets {
+            if let localBucket = mergedBuckets[key] {
+                mergedBuckets[key] = Self.sumConversationBuckets(localBucket, peerBucket)
+            } else {
+                mergedBuckets[key] = peerBucket
+            }
+        }
+
+        let built = (infos: mergedInfos, buckets: mergedBuckets)
+        cachedEffective = built
+        return built
+    }
+
+    private static func sumConversationBuckets(
+        _ lhs: ConversationUsageBucket,
+        _ rhs: ConversationUsageBucket
+    ) -> ConversationUsageBucket {
+        var copy = lhs
+        copy.firstAt = min(lhs.firstAt, rhs.firstAt)
+        copy.lastAt = max(lhs.lastAt, rhs.lastAt)
+        copy.inputTokens += rhs.inputTokens
+        copy.outputTokens += rhs.outputTokens
+        copy.cacheReadTokens += rhs.cacheReadTokens
+        copy.cacheCreationTokens += rhs.cacheCreationTokens
+        copy.requestCount += rhs.requestCount
+        copy.costUSD += rhs.costUSD
+        copy.inputCostUSD += rhs.inputCostUSD
+        copy.outputCostUSD += rhs.outputCostUSD
+        copy.cacheReadCostUSD += rhs.cacheReadCostUSD
+        copy.cacheCreationCostUSD += rhs.cacheCreationCostUSD
+        copy.hasUnpricedUsage = lhs.hasUnpricedUsage || rhs.hasUnpricedUsage
+        copy.timing.merge(rhs.timing)
+        return copy
     }
 
     func query(_ rawRequest: ConversationQueryRequest) -> ConversationQueryResult {
@@ -198,9 +320,10 @@ final class ConversationAggregator {
         request.search = request.search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if let cachedQuery, cachedQuery.request == request { return cachedQuery.result }
 
+        let effective = effectiveData()
         let subtasks = subtaskGrouping()
         var grouped: [String: [ConversationUsageBucket]] = [:]
-        for bucket in buckets.values where bucket.day >= request.from && bucket.day < request.to {
+        for bucket in effective.buckets.values where bucket.day >= request.from && bucket.day < request.to {
             if let app = request.app, bucket.app != app { continue }
             grouped[subtasks.rootKey(bucket.conversationKey), default: []].append(bucket)
         }
@@ -209,7 +332,7 @@ final class ConversationAggregator {
         var projects: [String: ProjectAccumulator] = [:]
         allSummaries.reserveCapacity(grouped.count)
         for (key, values) in grouped {
-            guard let info = subtasks.rootInfos[key] ?? infos[key] else { continue }
+            guard let info = subtasks.rootInfos[key] ?? effective.infos[key] else { continue }
             let item = aggregate(values)
             var rangeLastAt = Date.distantPast
             var modelNames: Set<String> = []
@@ -297,27 +420,28 @@ final class ConversationAggregator {
         let request = RecentRequest(revision: revision, since: since, apps: apps, limit: limit)
         if let cachedRecent, cachedRecent.request == request { return cachedRecent.rows }
 
+        let effective = effectiveData()
         let subtasks = subtaskGrouping()
         var latest: [String: Date] = [:]
-        for bucket in buckets.values where bucket.lastAt >= since && apps.contains(bucket.app) {
+        for bucket in effective.buckets.values where bucket.lastAt >= since && apps.contains(bucket.app) {
             let key = subtasks.rootKey(bucket.conversationKey)
             latest[key] = max(latest[key] ?? .distantPast, bucket.lastAt)
         }
         let picked = latest
-            .filter { (subtasks.rootInfos[$0.key] ?? infos[$0.key]) != nil }
+            .filter { (subtasks.rootInfos[$0.key] ?? effective.infos[$0.key]) != nil }
             .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
             .prefix(limit)
         let pickedKeys = Set(picked.map(\.key))
 
         var grouped: [String: [ConversationUsageBucket]] = [:]
         if !pickedKeys.isEmpty {
-            for bucket in buckets.values {
+            for bucket in effective.buckets.values {
                 let key = subtasks.rootKey(bucket.conversationKey)
                 if pickedKeys.contains(key) { grouped[key, default: []].append(bucket) }
             }
         }
         let rows: [ConversationSummary] = picked.compactMap { entry in
-            guard let info = subtasks.rootInfos[entry.key] ?? infos[entry.key],
+            guard let info = subtasks.rootInfos[entry.key] ?? effective.infos[entry.key],
                   let values = grouped[entry.key] else { return nil }
             let item = aggregate(values)
             return ConversationSummary(
@@ -350,11 +474,12 @@ final class ConversationAggregator {
             var worktrees: Set<String> = []
         }
 
+        let effective = effectiveData()
         let subtasks = subtaskGrouping()
         var grouped: [String: [ConversationUsageBucket]] = [:]
         var attributedByDayApp: [UsageDayAppKey: UsageTotals] = [:]
-        for bucket in buckets.values where bucket.day >= request.from && bucket.day < request.to {
-            guard request.apps.contains(bucket.app), infos[bucket.conversationKey] != nil else { continue }
+        for bucket in effective.buckets.values where bucket.day >= request.from && bucket.day < request.to {
+            guard request.apps.contains(bucket.app), effective.infos[bucket.conversationKey] != nil else { continue }
             grouped[subtasks.rootKey(bucket.conversationKey), default: []].append(bucket)
             attributedByDayApp[UsageDayAppKey(day: bucket.day, app: bucket.app), default: .zero]
                 .add(Self.totals(of: bucket))
@@ -365,7 +490,7 @@ final class ConversationAggregator {
         var conversations: [TopConversationRow] = []
         conversations.reserveCapacity(grouped.count)
         for (key, values) in grouped {
-            guard let info = subtasks.rootInfos[key] ?? infos[key] else { continue }
+            guard let info = subtasks.rootInfos[key] ?? effective.infos[key] else { continue }
             let item = aggregate(values)
             var rangeLastAt = Date.distantPast
             var modelNames: Set<String> = []
@@ -442,12 +567,13 @@ final class ConversationAggregator {
         var activeDays: Set<Date> = []
         var inRange: [String: [ConversationUsageBucket]] = [:]
         var worktreeLinks: [String: ProjectWorktreeLink?] = [:]
+        let effective = effectiveData()
         let subtasks = subtaskGrouping()
 
-        for bucket in buckets.values where request.apps.contains(bucket.app) {
+        for bucket in effective.buckets.values where request.apps.contains(bucket.app) {
             // 子对话按根对话的项目归属，与列表合并成一行的口径一致。
             let conversationKey = subtasks.rootKey(bucket.conversationKey)
-            guard let info = subtasks.rootInfos[conversationKey] ?? infos[conversationKey] else { continue }
+            guard let info = subtasks.rootInfos[conversationKey] ?? effective.infos[conversationKey] else { continue }
             let resolved = resolvedIdentity(for: info)
             guard resolved.identity.key == request.projectKey else { continue }
             identity = identity ?? resolved.identity
@@ -481,7 +607,7 @@ final class ConversationAggregator {
         var worktreeTotals: [String: UsageTotals] = [:]
         var conversations: [TopConversationRow] = []
         for (key, values) in inRange {
-            guard let info = subtasks.rootInfos[key] ?? infos[key] else { continue }
+            guard let info = subtasks.rootInfos[key] ?? effective.infos[key] else { continue }
             let item = aggregate(values)
             var rangeLastAt = Date.distantPast
             var modelNames: Set<String> = []
@@ -576,7 +702,8 @@ final class ConversationAggregator {
 
     /// 周期拆分用：对话 key → 统计页项目身份；缺档案时返回 nil。
     func statsProjectIdentity(forConversationKey key: String) -> StatsProjectIdentity? {
-        infos[subtaskGrouping().rootKey(key)].map { resolvedIdentity(for: $0).identity }
+        let effective = effectiveData()
+        return effective.infos[subtaskGrouping().rootKey(key)].map { resolvedIdentity(for: $0).identity }
     }
 
     /// 项目排序：API 等值降序，同值按名称；无明确项目与系统任务固定在最后。
@@ -647,13 +774,14 @@ final class ConversationAggregator {
     }
 
     func detail(key rawKey: String, metric: StatsRankMetric = .cost) -> ConversationDetail? {
+        let effective = effectiveData()
         let subtasks = subtaskGrouping()
         let key = subtasks.rootKey(rawKey)
         if let cachedDetail, cachedDetail.revision == revision, cachedDetail.key == key, cachedDetail.metric == metric {
             return cachedDetail.detail
         }
-        guard let info = subtasks.rootInfos[key] ?? infos[key] else { return nil }
-        let values = buckets.values.filter { subtasks.rootKey($0.conversationKey) == key }
+        guard let info = subtasks.rootInfos[key] ?? effective.infos[key] else { return nil }
+        let values = effective.buckets.values.filter { subtasks.rootKey($0.conversationKey) == key }
         let overall = aggregate(Array(values))
         var perModel: [String: [ConversationUsageBucket]] = [:]
         for value in values { perModel[value.model, default: []].append(value) }
@@ -743,24 +871,25 @@ final class ConversationAggregator {
     /// 只有经过 `parentKey` 并入的根对话标记含子任务；续接链用最近一段的标题，与桌面端显示一致。
     private func subtaskGrouping() -> SubtaskGrouping {
         if let cachedSubtaskGrouping { return cachedSubtaskGrouping }
+        let allInfos = effectiveData().infos
         var grouping = SubtaskGrouping()
         var titleAt: [String: Date] = [:]
-        for (key, info) in infos where info.parentKey != nil || info.continuationKey != nil {
+        for (key, info) in allInfos where info.parentKey != nil || info.continuationKey != nil {
             var current = key
             var visited: Set<String> = [key]
             var viaSubtask = false
-            while let currentInfo = infos[current],
+            while let currentInfo = allInfos[current],
                   let next = currentInfo.parentKey ?? currentInfo.continuationKey,
-                  infos[next] != nil, visited.insert(next).inserted {
+                  allInfos[next] != nil, visited.insert(next).inserted {
                 if currentInfo.parentKey != nil { viaSubtask = true }
                 current = next
             }
-            guard current != key, var root = grouping.rootInfos[current] ?? infos[current] else { continue }
+            guard current != key, var root = grouping.rootInfos[current] ?? allInfos[current] else { continue }
             grouping.rootKeys[key] = current
             if viaSubtask {
                 root.includesSubtasks = true
             } else if let title = info.title, !title.isEmpty,
-                      info.lastAt > (titleAt[current] ?? infos[current]?.lastAt ?? .distantPast) {
+                      info.lastAt > (titleAt[current] ?? allInfos[current]?.lastAt ?? .distantPast) {
                 root.title = title
                 titleAt[current] = info.lastAt
             }
@@ -815,6 +944,7 @@ final class ConversationAggregator {
 
     private func markChanged() {
         revision &+= 1
+        cachedEffective = nil
         cachedQuery = nil
         cachedDetail = nil
         cachedOverview = nil

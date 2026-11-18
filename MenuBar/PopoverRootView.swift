@@ -1113,6 +1113,10 @@ private struct RecentSessionsQuickSection: View {
         guard rows.indices.contains(index) else { return }
         let record = rows[index]
         popoverState.keyboardSelection = index
+        if record.isRemoteSynced {
+            onOpenSession(record.key, record.origin.usageApp)
+            return
+        }
         SessionActions.copyResumeCommand(record.resumeCommand)
         keyboardCopiedKey = record.key
         keyboardCopyResetTask?.cancel()
@@ -1286,7 +1290,9 @@ private struct QuickSessionResumeRow: View {
                   ? tr("Directory no longer exists; the command will skip `cd`", "工作目录已不存在，恢复命令将不带 cd")
                   : PrivacyDisplay.help(record.cwd ?? record.sessionID))
 
-            if showsKeyboardCopied {
+            if let syncedDevice = record.syncedDeviceName {
+                SyncedDeviceBadge(deviceName: syncedDevice, compact: true)
+            } else if showsKeyboardCopied {
                 Label(tr("Copied", "已复制"), systemImage: "checkmark")
                     .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(PopoverPalette.barNormalFill)

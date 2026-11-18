@@ -767,6 +767,8 @@ struct SettingsRootView: View {
             }
         }
 
+        cloudSyncGroup(settings: settings)
+
         proxyGroup(settings: settings)
 
         PrefsGroup(
@@ -858,6 +860,235 @@ struct SettingsRootView: View {
                     .disabled(recalculating || SettingsStore.shared.enabledLocalUsageApps.isEmpty)
                 }
             }
+        }
+    }
+
+    // MARK: - Multi-Device Cloud Sync
+
+    private func cloudSyncGroup(settings: SettingsStore) -> some View {
+        @Bindable var settings = settings
+        let folderHint = cloudSyncFolderDescription(settings: settings)
+        return PrefsGroup(
+            title: "Multi-Device Cloud Sync",
+            chinese: "多设备云同步",
+            desc: "Sync conversation summaries and token billing across Macs via conflict-free per-device shards. Raw logs and credentials stay local.",
+            chineseDesc: "按设备独立分片同步对话列表摘要与 Token 账单，原始日志与账号凭据绝不上传"
+        ) {
+            PrefsRow(
+                label: "Sync conversations & billing",
+                chinese: "同步对话摘要与账单",
+                desc: "Each Mac writes only its own shard file and merges other Macs in memory.",
+                chineseDesc: "每台 Mac 仅写入自身分片文件，读取合并其他设备数据，零写锁冲突"
+            ) {
+                Toggle("", isOn: Binding(
+                    get: { settings.cloudSyncEnabled },
+                    set: { enabled in
+                        settings.cloudSyncEnabled = enabled
+                        if enabled {
+                            Task { await appState.cloudSync.syncNow(appState: appState) }
+                        } else {
+                            appState.cloudSync.disableAndClearOverlay(appState: appState)
+                        }
+                    }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+            }
+
+            if settings.cloudSyncEnabled {
+                InsetDivider()
+                PrefsRow(
+                    label: "Sync folder",
+                    chinese: "同步目录",
+                    desc: folderHint,
+                    chineseDesc: folderHint
+                ) {
+                    HStack(spacing: 6) {
+                        Picker("", selection: Binding(
+                            get: { settings.cloudSyncDirectoryMode },
+                            set: { mode in
+                                settings.cloudSyncDirectoryMode = mode
+                                if mode == .custom && settings.cloudSyncCustomDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    chooseCloudSyncDirectory(settings: settings)
+                                } else {
+                                    Task { await appState.cloudSync.syncNow(appState: appState) }
+                                }
+                            }
+                        )) {
+                            Text("iCloud Drive").tag(CloudSyncDirectoryMode.icloudDrive)
+                            Text(tr("Custom folder", "自定义目录")).tag(CloudSyncDirectoryMode.custom)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .fixedSize()
+
+                        if settings.cloudSyncDirectoryMode == .custom {
+                            Button(tr("Choose…", "选择…")) {
+                                chooseCloudSyncDirectory(settings: settings)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+
+                        if let url = settings.resolvedCloudSyncDirectoryURL {
+                            Button {
+                                try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+                                NSWorkspace.shared.open(url)
+                            } label: {
+                                Image(systemName: "folder")
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .help(tr("Open sync folder in Finder", "在访达中打开同步目录"))
+                        }
+                    }
+                }
+
+                InsetDivider()
+                PrefsRow(
+                    label: "This Mac's name",
+                    chinese: "本机名称",
+                    desc: "Displayed as the source badge on your other Macs.",
+                    chineseDesc: "在其他设备上标识仅在本机产生的对话来源"
+                ) {
+                    TextField(
+                        SettingsStore.defaultCloudSyncDeviceName,
+                        text: $settings.cloudSyncDeviceName
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 170)
+                    .onSubmit {
+                        Task { await appState.cloudSync.syncNow(appState: appState) }
+                    }
+                }
+
+                InsetDivider()
+                PrefsRow(
+                    label: "Sync status",
+                    chinese: "同步状态",
+                    detail: cloudSyncStatusDetail
+                ) {
+                    Button {
+                        Task { await appState.cloudSync.syncNow(appState: appState) }
+                    } label: {
+                        if appState.cloudSync.isSyncing {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Text(tr("Sync Now", "立即同步"))
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(appState.cloudSync.isSyncing)
+                }
+
+                if !appState.cloudSync.peerStatuses.isEmpty {
+                    InsetDivider()
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(tr("Synced Macs", "已发现的其他设备"))
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        ForEach(appState.cloudSync.peerStatuses) { peer in
+                            HStack(spacing: 8) {
+                                Image(systemName: peer.isDownloadingFromICloud ? "icloud.and.arrow.down" : "laptopcomputer")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                Text(PrivacyDisplay.isEnabled ? tr("Other Mac", "其他设备") : peer.deviceName)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .lineLimit(1)
+                                Spacer()
+                                if peer.isDownloadingFromICloud && peer.conversationCount == 0 {
+                                    Text(tr("Downloading from iCloud…", "正在从 iCloud 下载…"))
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.tertiary)
+                                } else {
+                                    Text(
+                                        tr(
+                                            "\(peer.conversationCount) conversations · \(StatsFormatter.day(peer.exportedAt)) \(StatsFormatter.time(peer.exportedAt))",
+                                            "\(peer.conversationCount) 条对话 · \(StatsFormatter.day(peer.exportedAt)) \(StatsFormatter.time(peer.exportedAt))"
+                                        )
+                                    )
+                                    .font(.system(size: 11))
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                                }
+                                Button {
+                                    Task {
+                                        await appState.cloudSync.removePeerShard(
+                                            deviceID: peer.deviceID,
+                                            appState: appState
+                                        )
+                                    }
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .font(.system(size: 10.5))
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.borderless)
+                                .help(tr("Remove this retired device's shard file", "移除该旧设备的同步分片文件"))
+                            }
+                        }
+                    }
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 16)
+                }
+            }
+        }
+    }
+
+    private func cloudSyncFolderDescription(settings: SettingsStore) -> String? {
+        if PrivacyDisplay.isEnabled { return nil }
+        switch settings.cloudSyncDirectoryMode {
+        case .icloudDrive:
+            return "~/Library/Mobile Documents/com~apple~CloudDocs/CCBarSync"
+        case .custom:
+            let trimmed = settings.cloudSyncCustomDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty
+                ? tr("No folder selected", "尚未选择同步目录")
+                : CloudSyncMerger.portablePath(trimmed, homePath: FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path)
+        }
+    }
+
+    private var cloudSyncStatusDetail: AnyView? {
+        if let err = appState.cloudSync.lastError, !err.isEmpty {
+            return AnyView(
+                Text(err)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.red)
+            )
+        }
+        if let syncedAt = appState.cloudSync.lastSyncedAt {
+            let peerCount = appState.cloudSync.peerStatuses.count
+            let summary = peerCount == 0
+                ? tr(
+                    "Last synced \(StatsFormatter.time(syncedAt)) · Turn on Cloud Sync on another Mac using the same iCloud Drive / folder",
+                    "上次同步 \(StatsFormatter.time(syncedAt)) · 在另一台 Mac 开启相同目录的云同步即可自动汇合"
+                )
+                : tr(
+                    "Last synced \(StatsFormatter.time(syncedAt)) · \(peerCount) other Mac(s) merged",
+                    "上次同步 \(StatsFormatter.time(syncedAt)) · 已合并 \(peerCount) 台其他设备"
+                )
+            return AnyView(
+                Text(summary)
+                    .font(.system(size: 11))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            )
+        }
+        return nil
+    }
+
+    private func chooseCloudSyncDirectory(settings: SettingsStore) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = tr("Select Sync Folder", "选择同步目录")
+        if panel.runModal() == .OK, let url = panel.url {
+            settings.cloudSyncCustomDirectory = url.standardizedFileURL.path
+            settings.cloudSyncDirectoryMode = .custom
+            Task { await appState.cloudSync.syncNow(appState: appState) }
         }
     }
 

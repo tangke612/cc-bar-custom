@@ -183,6 +183,8 @@
 		5D710002000000000001AABB /* LocalSkillService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C710002000000000001AAAA /* LocalSkillService.swift */; };
 		5D710003000000000001AABB /* SkillStatsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C710003000000000001AAAA /* SkillStatsView.swift */; };
 		5D710004000000000001AABB /* LocalSkillScannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C710004000000000001AAAA /* LocalSkillScannerTests.swift */; };
+		5D720001000000000001AABB /* CloudSyncService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C720001000000000001AAAA /* CloudSyncService.swift */; };
+		5D720002000000000001AABB /* CloudSyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C720002000000000001AAAA /* CloudSyncTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -373,6 +375,8 @@
 		5C710002000000000001AAAA /* LocalSkillService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalSkillService.swift; sourceTree = "<group>"; };
 		5C710003000000000001AAAA /* SkillStatsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillStatsView.swift; sourceTree = "<group>"; };
 		5C710004000000000001AAAA /* LocalSkillScannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalSkillScannerTests.swift; sourceTree = "<group>"; };
+		5C720001000000000001AAAA /* CloudSyncService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudSyncService.swift; sourceTree = "<group>"; };
+		5C720002000000000001AAAA /* CloudSyncTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudSyncTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -525,6 +529,7 @@
 				49C1B168000000000001AAAA /* ConversationRollupCache.swift */,
 				49C1B196000000000001AAAA /* ImportedUsageBackfill.swift */,
 				49C1BC13000000000001AAAA /* CursorUsageCache.swift */,
+				5C720001000000000001AAAA /* CloudSyncService.swift */,
 			);
 			path = Storage;
 			sourceTree = "<group>";
@@ -704,6 +709,7 @@
 				49C2AA0D000000000001AAAA /* UsageHistoryTestHarness.swift */,
 				49C2B205000000000001AAAA /* SessionResumeTests.swift */,
 				5C710004000000000001AAAA /* LocalSkillScannerTests.swift */,
+				5C720002000000000001AAAA /* CloudSyncTests.swift */,
 				49C1B3F2000000000001AAAA /* Fixtures */,
 			);
 			path = CCBarTests;
@@ -980,6 +986,7 @@
 				49C1B193000000000001AABB /* OtherCodexAccountsSection.swift in Sources */,
 				49C1B194000000000001AABB /* ImportedCodexAccountsView.swift in Sources */,
 				49C1B195000000000001AABB /* CodexResetCreditsDetailView.swift in Sources */,
+				5D720001000000000001AABB /* CloudSyncService.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1025,6 +1032,7 @@
 				49C1BB03000000000001AABB /* ProjectUsageTests.swift in Sources */,
 				49C2B205000000000001AABB /* SessionResumeTests.swift in Sources */,
 				5D710004000000000001AABB /* LocalSkillScannerTests.swift in Sources */,
+				5D720002000000000001AABB /* CloudSyncTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

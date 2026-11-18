@@ -498,6 +498,11 @@ private struct ConversationListRow: View {
         appState.sessionHistory.resumeCommand(for: summary.info)
     }
 
+    private var syncedDeviceName: String? {
+        appState.usageService.conversationAggregator.syncedDeviceName(forKey: summary.info.key)
+            ?? sessionRecord?.syncedDeviceName
+    }
+
     private var displayTitle: String {
         if PrivacyDisplay.isEnabled {
             return PrivacyDisplay.conversation(summary.info)
@@ -570,6 +575,8 @@ private struct ConversationListRow: View {
                     .foregroundStyle(.primary)
                 if let resumeCommand {
                     CopyResumeCommandButton(resumeCommand: resumeCommand, compact: true)
+                } else if let syncedDeviceName {
+                    SyncedDeviceBadge(deviceName: syncedDeviceName, compact: true)
                 }
             }
             .lineLimit(1)
@@ -646,7 +653,11 @@ private struct SessionOnlyDetailView: View {
                             .background(Color.secondary.opacity(0.12), in: Capsule())
                     }
                     Spacer()
-                    CopyResumeCommandButton(resumeCommand: record.resumeCommand, compact: false)
+                    if let syncedDevice = record.syncedDeviceName {
+                        SyncedDeviceBadge(deviceName: syncedDevice, compact: false)
+                    } else {
+                        CopyResumeCommandButton(resumeCommand: record.resumeCommand, compact: false)
+                    }
                 }
 
                 Text(PrivacyDisplay.isEnabled ? tr("Session", "会话") : (record.primaryTitle ?? tr("Untitled", "（无标题）")))
@@ -718,6 +729,11 @@ private struct ConversationDetailView: View {
                     } trailing: {
                         speedDetails(fillHeight: isWide)
                     }
+                    if !PrivacyDisplay.isEnabled,
+                       let record = sessionRecord,
+                       (record.firstPrompt != nil || record.latestPrompt != nil) {
+                        promptSummaryPanel(record: record)
+                    }
                 }
                 .padding(20)
             }
@@ -726,6 +742,42 @@ private struct ConversationDetailView: View {
 
     private var sessionRecord: SessionHistoryRecord? {
         appState.sessionHistory.record(for: detail.info)
+    }
+
+    private var syncedDeviceName: String? {
+        appState.usageService.conversationAggregator.syncedDeviceName(forKey: detail.info.key)
+            ?? sessionRecord?.syncedDeviceName
+    }
+
+    private func promptSummaryPanel(record: SessionHistoryRecord) -> some View {
+        DetailPanel(title: tr("Prompt summary", "提问摘要")) {
+            VStack(alignment: .leading, spacing: 8) {
+                if let first = record.firstPrompt, !first.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(tr("First prompt", "首条提问"))
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                        Text(first)
+                            .font(.system(size: 12))
+                            .textSelection(.enabled)
+                    }
+                }
+                if let latest = record.latestPrompt, !latest.isEmpty, latest != record.firstPrompt {
+                    if let first = record.firstPrompt, !first.isEmpty {
+                        Divider()
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(tr("Latest prompt", "最近提问"))
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                        Text(latest)
+                            .font(.system(size: 12))
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     private var header: some View {
@@ -757,6 +809,8 @@ private struct ConversationDetailView: View {
                 Spacer()
                 if let resumeCommand = appState.sessionHistory.resumeCommand(for: detail.info) {
                     CopyResumeCommandButton(resumeCommand: resumeCommand, compact: false)
+                } else if let syncedDeviceName {
+                    SyncedDeviceBadge(deviceName: syncedDeviceName, compact: false)
                 }
             }
             Text(detailTitle)

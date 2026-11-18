@@ -6,13 +6,13 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, custom]
   workflow_dispatch:
 
-# 同一个 PR 的新提交取消旧任务；main 上的每个提交都完整跑完。
+# 同一个 PR 的新提交取消旧任务；main / custom 上的每个提交都完整跑完。
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/custom' }}
 
 permissions:
   contents: read

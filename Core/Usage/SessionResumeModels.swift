@@ -286,8 +286,12 @@ nonisolated struct SessionHistoryRecord: Sendable, Codable, Equatable, Identifia
     var permission: SessionLaunchPermission?
     /// 会话所在 git 分支（若可读）。
     var gitBranch: String?
+    /// 非 nil 表示该记录来自其他同步设备（本机不可直接执行终端恢复命令）。
+    var syncedDeviceName: String? = nil
 
     var id: String { key }
+
+    var isRemoteSynced: Bool { syncedDeviceName != nil }
 
     func resumeCommand(mode: ResumePermissionMode) -> SessionResumeCommand {
         SessionResumeCommand.build(
@@ -306,14 +310,23 @@ nonisolated struct SessionHistoryRecord: Sendable, Codable, Equatable, Identifia
     }
 
     /// cwd 是否仍存在于磁盘（目录被删除或移动时恢复命令自动去掉 `cd`）。
+    /// 对跨设备同步来的路径先过 `ConversationProjectResolver.allowsFileSystemCheck`，避免触碰 TCC 保护目录弹窗。
     var cwdExists: Bool {
         guard let cwd, !cwd.isEmpty else { return false }
+        if isRemoteSynced {
+            let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
+            let standardized = URL(fileURLWithPath: cwd).standardizedFileURL.path
+            guard ConversationProjectResolver.allowsFileSystemCheck(standardizedPath: standardized, home: home) else {
+                return false
+            }
+        }
         var isDir: ObjCBool = false
         return FileManager.default.fileExists(atPath: cwd, isDirectory: &isDir) && isDir.boolValue
     }
 
-    /// cwd 有记录但已不存在。
+    /// cwd 有记录但已不存在（其他设备同步来的会话不提示本机路径缺失）。
     var cwdIsMissing: Bool {
+        guard !isRemoteSynced else { return false }
         guard let cwd, !cwd.isEmpty else { return false }
         return !cwdExists
     }

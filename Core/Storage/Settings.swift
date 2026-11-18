@@ -87,6 +87,13 @@ nonisolated enum AppAppearanceMode: String, CaseIterable, Identifiable, Sendable
     var id: String { rawValue }
 }
 
+nonisolated enum CloudSyncDirectoryMode: String, CaseIterable, Identifiable, Codable, Sendable {
+    case icloudDrive
+    case custom
+
+    var id: String { rawValue }
+}
+
 enum MenuBarWindowChoice: String, CaseIterable, Identifiable {
     case primary
     case weekly
@@ -409,6 +416,71 @@ final class SettingsStore {
         didSet { defaults.set(recentConversationLimit, forKey: Keys.recentConversationLimit) }
     }
 
+    // MARK: 定制：多设备分片云同步（对话列表摘要 + Token 账单）
+
+    /// 是否开启多设备云同步（按设备独立分片，单写多读零冲突）。
+    var cloudSyncEnabled: Bool {
+        didSet { defaults.set(cloudSyncEnabled, forKey: Keys.cloudSyncEnabled) }
+    }
+    /// 同步目录来源：默认 iCloud Drive 私有目录，或手动指定目录（Syncthing / Dropbox / NAS 等）。
+    var cloudSyncDirectoryMode: CloudSyncDirectoryMode {
+        didSet { defaults.set(cloudSyncDirectoryMode.rawValue, forKey: Keys.cloudSyncDirectoryMode) }
+    }
+    /// 自定义同步目录绝对路径（`cloudSyncDirectoryMode == .custom` 时使用）。
+    var cloudSyncCustomDirectory: String {
+        didSet { defaults.set(cloudSyncCustomDirectory, forKey: Keys.cloudSyncCustomDirectory) }
+    }
+    /// 本机唯一设备分片 ID（首次启动自动生成 UUID 并持久保存在本机 UserDefaults）。
+    let cloudSyncDeviceID: String
+    /// 本机展示给其他设备的名称（默认系统主机名）。
+    var cloudSyncDeviceName: String {
+        didSet { defaults.set(cloudSyncDeviceName, forKey: Keys.cloudSyncDeviceName) }
+    }
+
+    nonisolated static var defaultCloudSyncDeviceName: String {
+        if let localized = Host.current().localizedName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !localized.isEmpty {
+            return localized
+        }
+        let host = ProcessInfo.processInfo.hostName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !host.isEmpty {
+            return host.replacingOccurrences(of: ".local", with: "")
+        }
+        return "Mac"
+    }
+
+    nonisolated static var iCloudDriveRootURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs", isDirectory: true)
+    }
+
+    nonisolated static var defaultICloudSyncDirectoryURL: URL {
+        iCloudDriveRootURL.appendingPathComponent("CCBarSync", isDirectory: true)
+    }
+
+    nonisolated static var isICloudDriveAvailable: Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: iCloudDriveRootURL.path, isDirectory: &isDir) && isDir.boolValue
+    }
+
+    /// 当前配置解析出的云同步根目录；自定义模式未填路径时为 nil。
+    var resolvedCloudSyncDirectoryURL: URL? {
+        switch cloudSyncDirectoryMode {
+        case .icloudDrive:
+            return Self.defaultICloudSyncDirectoryURL
+        case .custom:
+            let trimmed = cloudSyncCustomDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            let expanded = NSString(string: trimmed).expandingTildeInPath
+            return URL(fileURLWithPath: expanded, isDirectory: true).standardizedFileURL
+        }
+    }
+
+    var effectiveCloudSyncDeviceName: String {
+        let trimmed = cloudSyncDeviceName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? Self.defaultCloudSyncDeviceName : String(trimmed.prefix(48))
+    }
+
     // 网络代理。key 与 `NetworkProxy.Keys` 共用：取数在后台直接读 UserDefaults，改完下一次请求即生效。
     var proxyMode: ProxyMode { didSet { defaults.set(proxyMode.rawValue, forKey: NetworkProxy.Keys.mode) } }
     var proxyType: ProxyType { didSet { defaults.set(proxyType.rawValue, forKey: NetworkProxy.Keys.type) } }
@@ -612,6 +684,20 @@ final class SettingsStore {
         googleAPIHotKeyPreset = GoogleAPIQuickHotKeyPreset(rawValue: ghpRaw) ?? .ctrlOptG
         let aamRaw = defaults.string(forKey: Keys.appAppearanceMode) ?? AppAppearanceMode.dark.rawValue
         appAppearanceMode = AppAppearanceMode(rawValue: aamRaw) ?? .dark
+        cloudSyncEnabled = defaults.object(forKey: Keys.cloudSyncEnabled) as? Bool ?? false
+        let csdRaw = defaults.string(forKey: Keys.cloudSyncDirectoryMode) ?? CloudSyncDirectoryMode.icloudDrive.rawValue
+        cloudSyncDirectoryMode = CloudSyncDirectoryMode(rawValue: csdRaw) ?? .icloudDrive
+        cloudSyncCustomDirectory = defaults.string(forKey: Keys.cloudSyncCustomDirectory) ?? ""
+        if let storedDeviceID = defaults.string(forKey: Keys.cloudSyncDeviceID)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !storedDeviceID.isEmpty {
+            cloudSyncDeviceID = storedDeviceID
+        } else {
+            let generated = UUID().uuidString.lowercased()
+            defaults.set(generated, forKey: Keys.cloudSyncDeviceID)
+            cloudSyncDeviceID = generated
+        }
+        cloudSyncDeviceName = defaults.string(forKey: Keys.cloudSyncDeviceName) ?? Self.defaultCloudSyncDeviceName
         Self.mergeServiceSwitches(providers: &providerDisplaySettings, usage: &usageServiceVisibility)
         saveProviderDisplaySettings()
         saveServiceOrder()
@@ -1024,5 +1110,10 @@ final class SettingsStore {
         static let googleAPIYoloEnabled = "ccbar.custom.googleAPIYoloEnabled"
         static let googleAPIHotKeyEnabled = "ccbar.custom.googleAPIHotKeyEnabled"
         static let googleAPIHotKeyPreset = "ccbar.custom.googleAPIHotKeyPreset"
+        static let cloudSyncEnabled = "ccbar.custom.cloudSyncEnabled"
+        static let cloudSyncDirectoryMode = "ccbar.custom.cloudSyncDirectoryMode"
+        static let cloudSyncCustomDirectory = "ccbar.custom.cloudSyncCustomDirectory"
+        static let cloudSyncDeviceID = "ccbar.custom.cloudSyncDeviceID"
+        static let cloudSyncDeviceName = "ccbar.custom.cloudSyncDeviceName"
     }
 }

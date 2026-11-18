@@ -11,9 +11,12 @@ import Observation
 final class UsageAggregator {
     private var localBuckets: [BucketKey: UsageBucket] = [:]
     private var remoteBuckets: [BucketKey: UsageBucket] = [:]
+    private var syncedBuckets: [BucketKey: UsageBucket] = [:]
     /// 任一分区写入后递增。统计页以它作为派生结果的缓存键：值不变就复用上次的派生结果，
     /// 不必每次 body 求值都重新取快照、重新聚合。
     private(set) var revision: UInt64 = 0
+    /// 仅在本地分区变更时递增，供多设备云同步判断是否需要重新导出本机分片或重算去重残差。
+    private(set) var localRevision: UInt64 = 0
 
     struct BucketKey: Hashable {
         let day: Date
@@ -28,6 +31,7 @@ final class UsageAggregator {
             let key = BucketKey(day: b.day, app: b.app, model: b.model, speed: b.speed)
             localBuckets[key] = b
         }
+        localRevision &+= 1
         revision &+= 1
     }
 
@@ -45,7 +49,10 @@ final class UsageAggregator {
     func ingestLocal(_ entries: [UsageEntry]) {
         // 空批次（没有新日志的扫描轮次）不算写入，不能推进 revision 触发统计页重算。
         guard entries.contains(where: { $0.app != .cursor }) else { return }
-        defer { revision &+= 1 }
+        defer {
+            localRevision &+= 1
+            revision &+= 1
+        }
         for e in entries where e.app != .cursor {
             let key = BucketKey(day: e.day, app: e.app, model: e.model, speed: e.speed)
             if var b = localBuckets[key] {
@@ -121,6 +128,29 @@ final class UsageAggregator {
             )
             localBuckets[key] = bucket
         }
+        localRevision &+= 1
+        revision &+= 1
+    }
+
+    /// 替换其他设备通过云同步合并进来的净增量日桶；只进入展示查询，绝不写入本地 `UsageSnapshotStore`。
+    func replaceSynced(buckets: [UsageBucket]) {
+        var next: [BucketKey: UsageBucket] = [:]
+        next.reserveCapacity(buckets.count)
+        for bucket in buckets where bucket.app != .cursor {
+            let key = BucketKey(
+                day: bucket.day,
+                app: bucket.app,
+                model: bucket.model,
+                speed: bucket.speed
+            )
+            if let existing = next[key] {
+                next[key] = Self.sumBuckets(existing, bucket)
+            } else {
+                next[key] = bucket
+            }
+        }
+        guard next != syncedBuckets else { return }
+        syncedBuckets = next
         revision &+= 1
     }
 
@@ -134,9 +164,20 @@ final class UsageAggregator {
         remoteBuckets.values.filter { $0.app == app }
     }
 
-    /// 本地与远端分区的合并读快照，仅供展示层使用。
+    /// 本地、远端与多设备云同步分区的合并读快照，仅供展示层使用。
     func snapshot() -> [UsageBucket] {
-        Array(localBuckets.values) + Array(remoteBuckets.values)
+        if syncedBuckets.isEmpty {
+            return Array(localBuckets.values) + Array(remoteBuckets.values)
+        }
+        var merged = localBuckets
+        for (key, synced) in syncedBuckets {
+            if let existing = merged[key] {
+                merged[key] = Self.sumBuckets(existing, synced)
+            } else {
+                merged[key] = synced
+            }
+        }
+        return Array(merged.values) + Array(remoteBuckets.values)
     }
 
     func todaySubscriptionCost(for app: UsageApp, now: Date = Date()) -> Decimal {
@@ -145,10 +186,15 @@ final class UsageAggregator {
     }
 
     /// 额度服务自己日志里的订阅用量费用（判定见 `CycleUsageAggregator.isSubscriptionUsage`），
-    /// 供弹出面板 Codex / Claude 花费使用；只读本地分区，远端分区只有 Cursor。
+    /// 供弹出面板 Codex / Claude 花费使用；含本地分区与跨设备同步净增量，远端分区只有 Cursor。
     func subscriptionCost(for app: UsageApp, from: Date, to: Date) -> Decimal {
         var sum: Decimal = 0
         for b in localBuckets.values
+        where b.app == app && b.day >= from && b.day < to
+            && CycleUsageAggregator.isSubscriptionUsage(app: b.app, model: b.model) {
+            sum += b.costUSD
+        }
+        for b in syncedBuckets.values
         where b.app == app && b.day >= from && b.day < to
             && CycleUsageAggregator.isSubscriptionUsage(app: b.app, model: b.model) {
             sum += b.costUSD
@@ -165,6 +211,11 @@ final class UsageAggregator {
             && CycleUsageAggregator.cycleApp(app: b.app, model: b.model) == quotaApp {
             sum += b.costUSD
         }
+        for b in syncedBuckets.values
+        where b.app != quotaApp && sources.contains(b.app) && b.day >= from && b.day < to
+            && CycleUsageAggregator.cycleApp(app: b.app, model: b.model) == quotaApp {
+            sum += b.costUSD
+        }
         return sum
     }
 
@@ -177,6 +228,23 @@ final class UsageAggregator {
         for b in remoteBuckets.values where b.app == app && b.day >= from && b.day < to {
             totals.add(b)
         }
+        for b in syncedBuckets.values where b.app == app && b.day >= from && b.day < to {
+            totals.add(b)
+        }
         return totals
+    }
+
+    private static func sumBuckets(_ lhs: UsageBucket, _ rhs: UsageBucket) -> UsageBucket {
+        var copy = lhs
+        copy.inputTokens += rhs.inputTokens
+        copy.outputTokens += rhs.outputTokens
+        copy.cacheReadTokens += rhs.cacheReadTokens
+        copy.cacheCreationTokens += rhs.cacheCreationTokens
+        copy.costUSD += rhs.costUSD
+        copy.requestCount += rhs.requestCount
+        copy.hasUnpricedUsage = lhs.hasUnpricedUsage || rhs.hasUnpricedUsage
+        copy.costIncomplete = lhs.costIncomplete || rhs.costIncomplete
+        copy.timing.merge(rhs.timing)
+        return copy
     }
 }

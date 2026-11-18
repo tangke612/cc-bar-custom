@@ -326,6 +326,7 @@ final class AppState {
 
     let usageService = UsageService(localUsageApps: { SettingsStore.shared.enabledLocalUsageApps })
     let sessionHistory = SessionHistoryService()
+    let cloudSync = CloudSyncService()
     let localSkills = LocalSkillService()
     private let scheduler = Scheduler()
     private var codexAlertEntryVersion: UInt64 = 0
@@ -498,6 +499,10 @@ final class AppState {
         loadQuotaCycles()
         reloadImportedCodexAccounts()
         await usageService.bootstrap(appState: self)
+        sessionHistory.isRemoteOnlyConversation = { [weak self] key in
+            self?.usageService.conversationAggregator.syncedDeviceName(forKey: key) != nil
+        }
+        await cloudSync.loadPeerShardsOnStartup(appState: self)
         await loadCodex()
         maybeShowKeychainPrompt()
         await loadClaude()
@@ -547,6 +552,7 @@ final class AppState {
                 AppLog.info(.usage, "cycle usage rebuild requested \(reason)")
                 await usageService.rebuildCycleUsageForRecentChanges(reasons: [reason])
             }
+            await cloudSync.syncPeriodically(appState: self)
         }
         // 启动后异步拉一次服务状态;后续由 Scheduler 5 分钟刷新一次
         Task { await refreshServiceStatus() }
@@ -580,6 +586,7 @@ final class AppState {
             await self.usageService.scanNow()
             await self.refreshGoogleAPILocalUsageIfNeeded()
             await self.sessionHistory.refreshNow()
+            await self.cloudSync.syncNow(appState: self)
             await self.localSkills.refreshNow()
             await self.refreshServiceStatus()
         }
@@ -767,6 +774,9 @@ final class AppState {
                         lastQuotaHistoryWriteAt = Date()
                     }
                     try await usageService.persistPendingForTermination()
+                    if didBootstrap {
+                        await cloudSync.flushForTermination(appState: self)
+                    }
                     terminationSaveResult = .success(())
                 } catch {
                     terminationSaveResult = .failure(error)

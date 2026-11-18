@@ -7,6 +7,7 @@
 > - **Google API 与 Gemini CLI 快速启动**：支持 Google AI Studio（`AIza...`）与 Vertex AI Express（`AQ...`）密钥验证与 Keychain 存储，本地增量统计 Gemini CLI 用量并支持日/月预算上限、悬停卡片「启动 / 复制」按钮与全局快捷键（默认 `⌃⌥G`）一键开启 YOLO / 模型会话
 > - **护眼深色模式**：默认启用深色界面并叠加防透光压底（白网页背后也不刺眼），悬停面板右上角一键切换深/浅色，设置「外观与显示」可选深色 / 浅色 / 跟随系统；菜单栏顶栏图标仍自动适配 macOS 顶栏明暗
 > - **本机技能（Skills）浏览**：统计窗口「视图 → 技能」只读索引 `~/.agents/skills`、Codex、Claude Code、Antigravity / Gemini、Cursor、OpenCode、Pi 等本机技能目录，支持关键词/拼音检索、来源与安装类型筛选、`SKILL.md` 预览及在 Finder / 编辑器中打开
+> - **多设备安全云同步（对话摘要 + Token 账单）**：「设置 → 数据与刷新 → 多设备云同步」按设备独立写入 `devices/device-<id>.json` 分片（默认走 iCloud Drive，也可选 Syncthing / Dropbox / NAS 目录），单写多读零锁冲突、跨机共有/续聊对话自动去重防翻倍，不同步任何 OAuth 令牌、API Key 或原始会话日志全文
 >
 > **安装 / 一键升级（仅 Apple 芯片 Mac）**：终端执行 `curl -fsSL https://raw.githubusercontent.com/tangke612/cc-bar-custom/custom/scripts/install-custom.sh | bash` 即可自动下载最新 `CCBar.dmg`、替换旧版、清除隔离标记并重启；也可从本仓库 [Releases](https://github.com/tangke612/cc-bar-custom/releases/latest) 手动下载 `CCBar.dmg` 拖入「应用程序」（首次打开前执行 `xattr -cr /Applications/CCBar.app`）。定制版已关闭应用内更新，避免被原项目新版本覆盖；原项目的介绍见下文。
 

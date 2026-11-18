@@ -3095,8 +3095,13 @@ final class UsageService {
         })
     }
 
+    func refreshPublishedTotals() {
+        publishTotals()
+    }
+
     private func publishTotals() {
         guard let appState else { return }
+        appState.cloudSync.recomputeMergedOverlayIfNeeded(appState: appState, publishTotals: false)
         appState.codexTodayCost = aggregator.todaySubscriptionCost(for: .codex)
         appState.claudeTodayCost = aggregator.todaySubscriptionCost(for: .claude)
     }

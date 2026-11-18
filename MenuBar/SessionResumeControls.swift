@@ -502,6 +502,41 @@ enum SessionActions {
     }
 }
 
+// MARK: - SyncedDeviceBadge
+
+/// 标记仅存在于其他云同步设备上的对话（替代本机无法直接执行的终端恢复按钮）。
+struct SyncedDeviceBadge: View {
+    let deviceName: String
+    var compact: Bool = false
+
+    var body: some View {
+        let label = PrivacyDisplay.isEnabled ? tr("Other Mac", "其他设备") : deviceName
+        HStack(spacing: compact ? 3 : 4) {
+            Image(systemName: "icloud")
+                .font(.system(size: compact ? 9 : 9.5, weight: .medium))
+            Text(label)
+                .font(.system(size: compact ? 10 : 10.5, weight: .medium))
+                .lineLimit(1)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, compact ? 6 : 7.5)
+        .padding(.vertical, compact ? 2.5 : 3)
+        .background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(Color.secondary.opacity(0.10))
+        )
+        .fixedSize()
+        .help(
+            PrivacyDisplay.isEnabled
+                ? tr("Synced from another Mac", "来自其他已同步设备（本机无原始会话日志）")
+                : tr(
+                    "Synced from \(deviceName) (summary & token billing only)",
+                    "同步自「\(deviceName)」（仅同步摘要与 Token 账单，原对话请在对应设备上恢复）"
+                )
+        )
+    }
+}
+
 // MARK: - Session Context Menu
 
 /// 会话行右键菜单（弹窗快捷区与主窗口会话列表共用）。
@@ -510,23 +545,32 @@ struct SessionContextMenuItems: View {
     var onDidPerform: () -> Void = {}
 
     var body: some View {
-        let command = record.resumeCommand
-        let terminal = SettingsStore.shared.resumeTerminalApp
+        if let syncedDevice = record.syncedDeviceName {
+            Text(
+                PrivacyDisplay.isEnabled
+                    ? tr("Synced from another Mac", "同步自其他设备")
+                    : tr("Synced from \(syncedDevice)", "同步自「\(syncedDevice)」")
+            )
+            Divider()
+        } else {
+            let command = record.resumeCommand
+            let terminal = SettingsStore.shared.resumeTerminalApp
 
-        Button(tr("Copy Resume Command", "复制恢复命令")) {
-            SessionActions.copyResumeCommand(command)
-        }
-        if SessionActions.isInstalled(terminal) {
-            Button(tr("Resume in \(terminal.displayName)", "在 \(terminal.displayName) 中恢复")) {
-                onDidPerform()
-                SessionActions.runInTerminal(command, app: terminal)
+            Button(tr("Copy Resume Command", "复制恢复命令")) {
+                SessionActions.copyResumeCommand(command)
             }
-        }
-        if let note = command.permissionNote {
-            Text(note)
-        }
+            if SessionActions.isInstalled(terminal) {
+                Button(tr("Resume in \(terminal.displayName)", "在 \(terminal.displayName) 中恢复")) {
+                    onDidPerform()
+                    SessionActions.runInTerminal(command, app: terminal)
+                }
+            }
+            if let note = command.permissionNote {
+                Text(note)
+            }
 
-        Divider()
+            Divider()
+        }
 
         Button(tr("Copy Session ID", "复制会话 ID")) {
             SessionActions.copy(record.sessionID)
@@ -550,7 +594,7 @@ struct SessionContextMenuItems: View {
                         }
                     }
                 }
-            } else {
+            } else if !record.isRemoteSynced {
                 Text(tr("Directory no longer exists", "工作目录已不存在"))
             }
         }
