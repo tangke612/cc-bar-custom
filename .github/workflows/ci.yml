@@ -91,7 +91,8 @@ jobs:
       - name: 编译测试包
         run: |
           set -o pipefail
-          xcodebuild \
+          mkdir -p build/ci
+          if ! xcodebuild \
             -project ccbar.xcodeproj \
             -scheme ccbar \
             -configuration Debug \
@@ -103,7 +104,12 @@ jobs:
             DEVELOPMENT_TEAM='' \
             PROVISIONING_PROFILE_SPECIFIER='' \
             CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES \
-            build-for-testing
+            build-for-testing 2>&1 | tee build/ci/xcodebuild.log; then
+            grep -E "error:|fatal error:" build/ci/xcodebuild.log | head -n 25 | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
+            exit 65
+          fi
 
       # 并行测试会启动多个测试宿主；主 App 的 LSMultipleInstancesProhibited 会拦住第 2 个实例。
       # 只在 CI 的测试副本上关掉并重新做 ad-hoc 签名，源码里的 Info.plist 不动。
@@ -215,13 +221,18 @@ jobs:
           esac
           mkdir -p build/ci/TestResults
           xctestrun=$(find build/ci/Build/Products -maxdepth 1 -name '*.xctestrun' -print -quit)
-          xcodebuild \
+          if ! xcodebuild \
             -xctestrun "$xctestrun" \
             -destination 'platform=macOS' \
             -parallel-testing-enabled YES \
             -resultBundlePath "build/ci/TestResults/shard-${{ matrix.shard }}.xcresult" \
             "${test_args[@]}" \
-            test-without-building
+            test-without-building 2>&1 | tee build/ci/xctest.log; then
+            grep -E "error:|failed -|Test Case .* failed" build/ci/xctest.log | head -n 25 | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
+            exit 65
+          fi
 
       - name: 上传测试结果
         if: always()
