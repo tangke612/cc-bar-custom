@@ -1012,11 +1012,16 @@ final class CloudSyncService {
             usage: [UsageBucket],
             conversations: (infos: [ConversationInfo], buckets: [ConversationUsageBucket]),
             sessions: [SessionHistoryRecord]
-        )? = shouldExport ? (
-            appState.usageService.aggregator.snapshotLocal(),
-            appState.usageService.conversationAggregator.snapshot(),
-            appState.sessionHistory.localRecords
-        ) : nil
+        )?
+        if shouldExport {
+            localInputs = (
+                usage: appState.usageService.aggregator.snapshotLocal(),
+                conversations: appState.usageService.conversationAggregator.snapshot(),
+                sessions: appState.sessionHistory.localRecords
+            )
+        } else {
+            localInputs = nil
+        }
 
         let ioResult = await Task.detached(priority: .utility) { () -> (wroteShard: Bool, writeError: String?, peerScan: PeerScanOutput) in
             var wrote = false
