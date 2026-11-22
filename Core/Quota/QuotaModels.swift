@@ -137,6 +137,7 @@ nonisolated enum QuotaSnapshotSource: String, Sendable, Codable {
     case cache
     /// 兼容旧版额度缓存和周期记录。
     case cliFallback
+    /// 兼容旧版 Antigravity CLI 缓存。
     case antigravityCLI
 
     var displayName: String {
@@ -166,6 +167,10 @@ nonisolated struct QuotaRefreshState: Sendable, Equatable {
     var lastErrorIsNetwork: Bool = false
     var inFlight: Bool = false
     var source: QuotaSnapshotSource?
+    /// 连续的非 429 失败次数与定时刷新冷却截止时间，见 `QuotaRefreshPolicy.failureCooldown`。
+    /// `storeQuota` 成功时清零；手动刷新不受冷却限制。
+    var consecutiveFailures: Int = 0
+    var failureCooldownUntil: Date?
 }
 
 nonisolated struct PrimaryQuotaState: Sendable, Equatable {
@@ -528,6 +533,9 @@ nonisolated enum QuotaError: Error, CustomStringConvertible {
     /// `desktopAccessDenied`:改用 Claude Desktop 登录只差钥匙串授权(用户拒绝过),
     /// 此时提示去设置里授权。
     case credentialsExpired(desktopAccessDenied: Bool)
+    /// Antigravity 的 refresh_token 已被 Google 拒绝（`invalid_grant`）或缺失，
+    /// cc-bar 无法续期；需要用户在 Antigravity 中重新登录，凭据变化后自动解除。
+    case antigravitySignedOut
 
     var description: String {
         switch self {
@@ -540,6 +548,8 @@ nonisolated enum QuotaError: Error, CustomStringConvertible {
         case .credentialsExpired(let desktopAccessDenied):
             return "claude credentials expired; waiting for Claude Code to refresh"
                 + (desktopAccessDenied ? " (Claude Desktop keychain access denied)" : "")
+        case .antigravitySignedOut:
+            return "antigravity sign-in revoked; waiting for a new Antigravity login"
         }
     }
 
@@ -558,8 +568,14 @@ nonisolated enum QuotaError: Error, CustomStringConvertible {
            cfNetworkProxyFailureCodes.contains(nsError.code) {
             return .network(.cannotConnect)
         }
-        guard let urlError = error as? URLError else { return .network(.other) }
-        return .network(NetworkFailureKind(urlError.code))
+        if let urlError = error as? URLError {
+            return .network(NetworkFailureKind(urlError.code))
+        }
+        // async URLSession 在代理配置失败等路径下可能抛出未桥接成 URLError 的 NSURLErrorDomain 实例。
+        if nsError.domain == NSURLErrorDomain {
+            return .network(NetworkFailureKind(URLError.Code(rawValue: nsError.code)))
+        }
+        return .network(.other)
     }
 
     var httpStatusCode: Int? {
@@ -613,6 +629,12 @@ extension NetworkFailureKind {
             return tr("No network connection", "网络未连接")
         case .cannotConnect:
             // 设置里指定了代理时直接点名那个地址,用户不用再猜走的是哪个代理。
+            if case .direct = proxy {
+                return tr(
+                    "Can't reach the service over a direct connection — check your network",
+                    "直连连不上服务,请检查网络"
+                )
+            }
             if case .proxy(let endpoint) = proxy {
                 return tr(
                     "Can't reach the service — check that proxy \(endpoint.address) is running",
@@ -624,6 +646,12 @@ extension NetworkFailureKind {
                 "连不上服务,请检查网络或代理"
             )
         case .timedOut:
+            if case .direct = proxy {
+                return tr(
+                    "Direct connection timed out — check your network",
+                    "直连超时,请检查网络"
+                )
+            }
             if case .proxy(let endpoint) = proxy {
                 return tr(
                     "Connection timed out — check proxy \(endpoint.address)",
@@ -656,7 +684,7 @@ extension NetworkFailureKind {
                     "Proxy address is malformed — fix it in Settings → Data & Refresh",
                     "代理地址格式不对,请到「设置 → 数据与刷新」修改"
                 )
-            case .system, .proxy:
+            case .system, .direct, .proxy:
                 // 失败之后用户已经改过设置,下一次刷新会按新设置重试。
                 return tr(
                     "Proxy unavailable — check Settings → Data & Refresh",
@@ -700,6 +728,8 @@ extension QuotaError {
                 "Sign-in expired — run claude in Terminal once",
                 "登录已过期,请在终端运行一次 claude"
             )
+        case .antigravitySignedOut:
+            return tr("Sign in to Antigravity again, then refresh", "请在 Antigravity 中重新登录,然后刷新")
         case .network(let kind):
             return kind.userMessage(using: proxy)
         case .http(let code, _):
