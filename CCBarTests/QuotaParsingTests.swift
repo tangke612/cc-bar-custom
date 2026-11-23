@@ -2583,6 +2583,7 @@ final class QuotaParsingTests: XCTestCase {
         XCTAssertEqual(totalInput(otherAgentSources: allSources), 131)
     }
 
+    @MainActor
     func testAntigravityCycleAttributionAndIndependentToggle() {
         XCTAssertEqual(CycleUsageAggregator.cycleApp(app: .pi, model: "antigravity/gemini-3.8-flash"), .antigravity)
         XCTAssertEqual(CycleUsageAggregator.cycleApp(app: .pi, model: "magpie/agy-cli/gemini-4-hydrogen"), .antigravity)
@@ -2598,20 +2599,38 @@ final class QuotaParsingTests: XCTestCase {
         let end = start.addingTimeInterval(5 * 3600)
         let agyCycle = QuotaCycleRecord(
             id: "antigravity:primary:user@example.com:5h:\(Int(end.timeIntervalSince1970))",
-            app: .antigravity,
             accountKey: "primary:user@example.com",
+            app: .antigravity,
+            limitID: "gemini-5h",
             limitKind: .fiveHour,
             startAt: start,
             endAt: end,
-            boundaryQuality: .observed,
+            scheduledEndAt: end,
             firstSampleAt: start.addingTimeInterval(60),
             lastSampleAt: start.addingTimeInterval(3600),
-            peakUsedPercent: 20,
-            lastUsedPercent: 20,
-            allowanceSegments: [QuotaCycleAllowanceSegment(id: "seg-1", startAt: start, endAt: nil, resetCount: 0, peakUsedPercent: 20)]
+            latestUsedPercent: 20,
+            allowanceSegments: [QuotaCycleAllowanceSegment(
+                id: "seg-1",
+                startAt: start,
+                endAt: nil,
+                baselineUsedPercent: 0,
+                latestUsedPercent: 20,
+                maximumUsedPercent: 20,
+                firstSampleAt: start.addingTimeInterval(60),
+                lastSampleAt: start.addingTimeInterval(3600),
+                startReason: .initial
+            )],
+            source: .api,
+            boundaryQuality: .observed
         )
         let segments = [
-            QuotaCycleAccountSegment(app: .antigravity, accountKey: "primary:user@example.com", startAt: start, endAt: nil)
+            QuotaCycleAccountSegment(
+                id: "agy-seg-1",
+                accountKey: "primary:user@example.com",
+                app: .antigravity,
+                startAt: start,
+                endAt: nil
+            )
         ]
         func makeEntry(_ app: UsageApp, _ key: String, _ model: String, input: Int) -> UsageEntry {
             UsageEntry(
@@ -2619,13 +2638,14 @@ final class QuotaParsingTests: XCTestCase {
                 conversationKey: key,
                 model: model,
                 speed: .standard,
+                day: UsageDay.startOfDay(for: start),
                 timestamp: start.addingTimeInterval(600),
                 inputTokens: input,
                 outputTokens: 0,
                 cacheReadTokens: 0,
                 cacheCreationTokens: 0,
                 costUSD: Decimal(input) / 1000,
-                requestCount: 1
+                costBreakdown: nil
             )
         }
 
