@@ -2597,39 +2597,13 @@ final class QuotaParsingTests: XCTestCase {
 
         let start = Date(timeIntervalSince1970: 200_000)
         let end = start.addingTimeInterval(5 * 3600)
-        let agyCycle = QuotaCycleRecord(
-            id: "antigravity:primary:user@example.com:5h:\(Int(end.timeIntervalSince1970))",
-            accountKey: "primary:user@example.com",
-            app: .antigravity,
-            limitID: "gemini-5h",
-            limitKind: .fiveHour,
-            startAt: start,
-            endAt: end,
-            scheduledEndAt: end,
-            firstSampleAt: start.addingTimeInterval(60),
-            lastSampleAt: start.addingTimeInterval(3600),
-            latestUsedPercent: 20,
-            allowanceSegments: [QuotaCycleAllowanceSegment(
-                id: "seg-1",
-                startAt: start,
-                endAt: nil,
-                baselineUsedPercent: 0,
-                latestUsedPercent: 20,
-                maximumUsedPercent: 20,
-                firstSampleAt: start.addingTimeInterval(60),
-                lastSampleAt: start.addingTimeInterval(3600),
-                startReason: .initial
-            )],
-            source: .api,
-            boundaryQuality: .observed
+        let agyCycle = cycleRecord(
+            id: "antigravity-weekly", accountKey: "primary:user@example.com", app: .antigravity,
+            start: start, end: end
         )
         let segments = [
             QuotaCycleAccountSegment(
-                id: "agy-seg-1",
-                accountKey: "primary:user@example.com",
-                app: .antigravity,
-                startAt: start,
-                endAt: nil
+                id: "a", accountKey: agyCycle.accountKey, app: .antigravity, startAt: start, endAt: nil
             )
         ]
         func makeEntry(_ app: UsageApp, _ key: String, _ model: String, input: Int) -> UsageEntry {
@@ -2644,8 +2618,7 @@ final class QuotaParsingTests: XCTestCase {
                 outputTokens: 0,
                 cacheReadTokens: 0,
                 cacheCreationTokens: 0,
-                costUSD: Decimal(input) / 1000,
-                costBreakdown: nil
+                costUSD: Decimal(input) / 1000
             )
         }
 
@@ -2665,7 +2638,7 @@ final class QuotaParsingTests: XCTestCase {
         func totalInput(_ sourcesByApp: [UsageApp: Set<UsageApp>]) -> Int? {
             aggregator.summaries(
                 cycles: [agyCycle],
-                kind: .fiveHour,
+                kind: .weekly,
                 app: .antigravity,
                 otherAgentSourcesByApp: sourcesByApp,
                 now: start.addingTimeInterval(3600)
@@ -2676,6 +2649,27 @@ final class QuotaParsingTests: XCTestCase {
         XCTAssertEqual(totalInput([.codex: CycleUsageAggregator.otherAgentSourceApps]), 100)
         XCTAssertEqual(totalInput([.antigravity: CycleUsageAggregator.otherAgentSourceApps]), 140)
         XCTAssertEqual(totalInput([.antigravity: [.pi, .dsh]]), 130)
+
+        // agy 插件对话库已覆盖：始终计入，日志里经 Magpie 的同一批请求（25）不再计；直连的照旧。
+        func bridgedInput(_ sources: Set<UsageApp>, coverageStart: Date) -> Int? {
+            let bridge = CycleUsageAggregator()
+            bridge.ingest(
+                entries: [makeEntry(.antigravity, "agy:bridge", "gemini-4-hydrogen", input: 30)],
+                cycles: [agyCycle], accountSegments: segments
+            )
+            return aggregator.summaries(
+                cycles: [agyCycle], kind: .weekly, app: .antigravity,
+                otherAgentSourcesByApp: [.antigravity: sources],
+                bridgeBuckets: bridge.snapshot(), bridgeCoverageStart: coverageStart,
+                now: start.addingTimeInterval(3600)
+            ).first?.totals.inputTokens
+        }
+        XCTAssertEqual(bridgedInput([], coverageStart: start), 130)
+        XCTAssertEqual(bridgedInput(CycleUsageAggregator.otherAgentSourceApps, coverageStart: start), 145)
+        XCTAssertEqual(bridgedInput([.pi], coverageStart: end), 155)
+        XCTAssertTrue(CycleUsageAggregator.isBridgedAntigravityModel("magpie-anthropic/agy-cli/gemini-4-hydrogen"))
+        XCTAssertFalse(CycleUsageAggregator.isBridgedAntigravityModel("antigravity/gemini-4-hydrogen"))
+        XCTAssertFalse(CycleUsageAggregator.isSubscriptionUsage(app: .antigravity, model: "claude-sonnet-5-5"))
     }
 
     func testSubscriptionUsageMatchesOnlyOfficialModels() {

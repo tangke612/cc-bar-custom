@@ -114,11 +114,28 @@ struct QuotaCycleCardsSection: View {
                         .monospacedDigit()
                         .lineLimit(1)
                         .minimumScaleFactor(0.75)
-                    Text(fullUseCaption(summary))
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
+                    HStack(spacing: 6) {
+                        Text(fullUseCaption(summary))
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                        if kind == .weekly, let ratio = weeklyToFiveHourRatio(app: app) {
+                            Spacer(minLength: 4)
+                            Text(tr(
+                                String(format: "≈ %.1f× 5h", ratio.ratio),
+                                String(format: "≈ %.1f× 5H", ratio.ratio)
+                            ))
+                            .font(.system(size: 10, weight: .medium))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1.5)
+                            .background(.primary.opacity(0.06), in: Capsule())
+                            .lineLimit(1)
+                            .help(weeklyRatioTooltip(ratio: ratio, remainingWeeklyPercent: 100 - usedPercent))
+                        }
+                    }
                 }
             }
 
@@ -222,12 +239,7 @@ struct QuotaCycleCardsSection: View {
         kind: QuotaLimitKind,
         app: UsageApp?
     ) -> [CycleUsageSummary] {
-        appState.usageService.cycleAggregator.summaries(
-            cycles: appState.quotaCycles.records,
-            kind: kind,
-            app: app,
-            otherAgentSourcesByApp: SettingsStore.shared.enabledCycleSubscriptionSourcesByApp
-        )
+        appState.cycleSummaries(kind: kind, app: app)
     }
 
     private func accountKey(for app: UsageApp) -> String? {
@@ -237,9 +249,58 @@ struct QuotaCycleCardsSection: View {
     private func hasAccount(_ app: UsageApp) -> Bool {
         accountKey(for: app) != nil
     }
+
+    private func weeklyToFiveHourRatio(app: UsageApp) -> WeeklyToFiveHourRatio? {
+        guard let accountKey = accountKey(for: app) else { return nil }
+        return QuotaHistoryStore.weeklyToFiveHourRatio(
+            payload: appState.quotaHistory,
+            accountKey: accountKey
+        )
+    }
+
+    private func weeklyRatioTooltip(
+        ratio: WeeklyToFiveHourRatio,
+        remainingWeeklyPercent: Double
+    ) -> String {
+        let remainingIn5H = max(0, remainingWeeklyPercent) / 100.0 * ratio.ratio
+        return tr(
+            String(
+                format: "1 weekly quota ≈ %.1f× 5-hour quota (from recent official percentage deltas: 5h -%d%%, weekly -%d%%). Remaining weekly quota ≈ %.1f× 5h.",
+                ratio.ratio,
+                ratio.fiveHourConsumedPercent,
+                ratio.weeklyConsumedPercent,
+                remainingIn5H
+            ),
+            String(
+                format: "1 周额度 ≈ %.1f 个 5 小时额度（按近期官方百分比累计消耗计算：5H 累计 -%d%%，周累计 -%d%%）。当前剩余周额度约合 %.1f 个 5 小时额度。",
+                ratio.ratio,
+                ratio.fiveHourConsumedPercent,
+                ratio.weeklyConsumedPercent,
+                remainingIn5H
+            )
+        )
+    }
 }
 
 private extension AppState {
+    /// 周期卡与历史周期共用的汇总，含 agy 插件对话库归入 Antigravity 周期的用量。
+    func cycleSummaries(kind: QuotaLimitKind, app: UsageApp?, now: Date = Date()) -> [CycleUsageSummary] {
+        let bridge = usageService.antigravityBridge
+        return usageService.cycleAggregator.summaries(
+            cycles: quotaCycles.records,
+            kind: kind,
+            app: app,
+            otherAgentSourcesByApp: SettingsStore.shared.enabledCycleSubscriptionSourcesByApp,
+            bridgeBuckets: app == nil || app == .antigravity
+                ? bridge.cycleBuckets(
+                    cycles: quotaCycles.records, kind: kind, accountSegments: quotaCycles.accountSegments
+                )
+                : [],
+            bridgeCoverageStart: bridge.coverageStart,
+            now: now
+        )
+    }
+
     /// 额度周期归属的主账号；未登录或该服务没有额度周期时为 nil。周期卡与历史周期共用。
     func cycleAccountKey(for app: UsageApp) -> String? {
         switch app {
@@ -313,13 +374,7 @@ struct QuotaCycleHistorySection: View {
     private func completedSummaries(app: UsageApp) -> [CycleUsageSummary] {
         guard let accountKey = appState.cycleAccountKey(for: app) else { return [] }
         let now = Date()
-        let summaries = appState.usageService.cycleAggregator.summaries(
-            cycles: appState.quotaCycles.records,
-            kind: kind,
-            app: app,
-            otherAgentSourcesByApp: SettingsStore.shared.enabledCycleSubscriptionSourcesByApp,
-            now: now
-        )
+        let summaries = appState.cycleSummaries(kind: kind, app: app, now: now)
         return Array(
             summaries
                 .filter { $0.cycle.accountKey == accountKey && $0.cycle.isComplete(at: now) && $0.hasLocalUsage }
