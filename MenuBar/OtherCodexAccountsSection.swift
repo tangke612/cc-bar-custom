@@ -133,9 +133,10 @@ private struct ImportedCodexRow: View {
                 .foregroundStyle(PopoverPalette.valueText(remainingPercent: window?.remainingPercent))
                 .frame(width: 30, alignment: .trailing)
 
-            ResetTimeText(resetsAt: window?.resetsAt)
+            QuotaWindowStatusText(window: window)
                 .font(.system(size: 10.5))
                 .foregroundStyle(PopoverPalette.secondaryText)
+                .lineLimit(1)
                 .frame(width: 70, alignment: .trailing)
         }
     }

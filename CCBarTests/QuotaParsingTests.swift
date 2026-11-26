@@ -259,6 +259,185 @@ final class QuotaParsingTests: XCTestCase {
         XCTAssertEqual(Set(payload.lastSamples.values.map(\.limitID)), ["gemini-5h", "gemini-weekly"])
     }
 
+    func testWeeklyToFiveHourRatioOffsetsInWindowRecoveriesWithoutCrossWindowOffset() {
+        let base = Date(timeIntervalSince1970: 1_792_389_600)
+        let accountKey = "antigravity:primary:test"
+        let firstFiveHourReset = base.addingTimeInterval(5 * 3600)
+        let secondFiveHourReset = base.addingTimeInterval(10 * 3600)
+        let weeklyReset = base.addingTimeInterval(7 * 24 * 3600)
+
+        func event(
+            id: String,
+            offset: TimeInterval,
+            kind: QuotaLimitKind,
+            before: Int,
+            after: Int,
+            resetsAt: Date?
+        ) -> QuotaChangeEvent {
+            QuotaChangeEvent(
+                id: id,
+                accountKey: accountKey,
+                app: .antigravity,
+                kind: .antigravityPrimary,
+                sampledAt: base.addingTimeInterval(offset),
+                limitID: kind == .fiveHour ? "gemini-5h" : "gemini-weekly",
+                limitKind: kind,
+                beforeRemainingPercent: before,
+                afterRemainingPercent: after,
+                deltaPercent: after - before,
+                resetsAt: resetsAt
+            )
+        }
+
+        let payload = QuotaHistoryPayload(
+            dayStart: QuotaHistoryStore.todayStart(now: base),
+            events: [
+                // 早期单侧周消耗（超过 1 天前），用于触发对齐截断
+                event(id: "w0", offset: -48 * 3600, kind: .weekly, before: 80, after: 74, resetsAt: weeklyReset),
+                // 消耗前的小幅回升不应抵消后续周消耗
+                event(id: "w1", offset: -180, kind: .weekly, before: 74, after: 77, resetsAt: weeklyReset),
+                event(id: "f1", offset: 0, kind: .fiveHour, before: 100, after: 82, resetsAt: firstFiveHourReset),
+                // 到期后重置回 100% 且 resetsAt 暂缺失，不应把 18% 跨窗恢复从 5H 消耗中扣减
+                event(id: "f_reset", offset: 5 * 3600 + 30, kind: .fiveHour, before: 82, after: 100, resetsAt: nil),
+                event(id: "f2", offset: 5 * 3600 + 120, kind: .fiveHour, before: 100, after: 93, resetsAt: secondFiveHourReset),
+                // 同窗内从 77 -> 74 -> 75 -> 71 的净消耗应为 6%，而不是重复累计的 7%
+                event(id: "w2", offset: 120, kind: .weekly, before: 77, after: 74, resetsAt: weeklyReset),
+                event(id: "w3", offset: 240, kind: .weekly, before: 74, after: 75, resetsAt: weeklyReset),
+                event(id: "w4", offset: 360, kind: .weekly, before: 75, after: 71, resetsAt: weeklyReset),
+            ]
+        )
+
+        let ratio = QuotaHistoryStore.weeklyToFiveHourRatio(payload: payload, accountKey: accountKey)
+        XCTAssertNotNil(ratio)
+        XCTAssertEqual(ratio?.fiveHourConsumedPercent, 25)
+        XCTAssertEqual(ratio?.weeklyConsumedPercent, 6)
+        XCTAssertEqual(ratio?.ratio ?? 0, 25.0 / 6.0, accuracy: 0.001)
+    }
+
+    func testCycleStoreWeeklyToFiveHourRatioSkipsPartialTransitionAndHandlesExtraReset() {
+        let base = Date(timeIntervalSince1970: 1_792_389_600)
+        let accountKey = "antigravity:primary:test"
+
+        func segment(
+            id: String,
+            startOffset: TimeInterval,
+            baseline: Double,
+            latest: Double,
+            maxUsed: Double,
+            reason: QuotaAllowanceSegmentStartReason = .initial
+        ) -> QuotaCycleAllowanceSegment {
+            let t = base.addingTimeInterval(startOffset)
+            return QuotaCycleAllowanceSegment(
+                id: id,
+                startAt: t,
+                endAt: nil,
+                baselineUsedPercent: baseline,
+                latestUsedPercent: latest,
+                maximumUsedPercent: maxUsed,
+                firstSampleAt: t,
+                lastSampleAt: t,
+                startReason: reason
+            )
+        }
+
+        func cycle(
+            id: String,
+            kind: QuotaLimitKind,
+            startOffset: TimeInterval,
+            endOffset: TimeInterval,
+            firstSampleOffset: TimeInterval,
+            latest: Double,
+            segments: [QuotaCycleAllowanceSegment]
+        ) -> QuotaCycleRecord {
+            QuotaCycleRecord(
+                id: id,
+                accountKey: accountKey,
+                app: .antigravity,
+                limitID: kind == .fiveHour ? "gemini-5h" : "gemini-weekly",
+                limitKind: kind,
+                startAt: base.addingTimeInterval(startOffset),
+                endAt: base.addingTimeInterval(endOffset),
+                scheduledEndAt: base.addingTimeInterval(endOffset),
+                firstSampleAt: base.addingTimeInterval(firstSampleOffset),
+                lastSampleAt: base.addingTimeInterval(firstSampleOffset + 3600),
+                latestUsedPercent: latest,
+                allowanceSegments: segments,
+                source: .api,
+                boundaryQuality: .observed
+            )
+        }
+
+        let day: TimeInterval = 24 * 3600
+        let hour: TimeInterval = 3600
+
+        let payload = QuotaCyclePayload(
+            trackingStartedAt: base.addingTimeInterval(-30 * day),
+            records: [
+                // 早期过渡周周期：0% 基线且起点早于首个 5H 采样超过 5 小时，应被跳过
+                cycle(
+                    id: "wk-transition",
+                    kind: .weekly,
+                    startOffset: -2 * day,
+                    endOffset: 0,
+                    firstSampleOffset: -12 * hour,
+                    latest: 45,
+                    segments: [segment(id: "s0", startOffset: -2 * day, baseline: 0, latest: 45, maxUsed: 48)]
+                ),
+                cycle(
+                    id: "fh-in-transition",
+                    kind: .fiveHour,
+                    startOffset: -12 * hour,
+                    endOffset: -7 * hour,
+                    firstSampleOffset: -12 * hour,
+                    latest: 50,
+                    segments: [segment(id: "sf0", startOffset: -12 * hour, baseline: 0, latest: 50, maxUsed: 50)]
+                ),
+                // 完整覆盖周周期：含一次 extraReset（首段 40%，重置回 10% 后用至 20% -> 总净耗 50%）
+                cycle(
+                    id: "wk-full",
+                    kind: .weekly,
+                    startOffset: 0,
+                    endOffset: 7 * day,
+                    firstSampleOffset: 600,
+                    latest: 20,
+                    segments: [
+                        segment(id: "s1", startOffset: 0, baseline: 0, latest: 40, maxUsed: 40, reason: .initial),
+                        segment(id: "s2", startOffset: 2 * day, baseline: 10, latest: 20, maxUsed: 22, reason: .extraReset),
+                    ]
+                ),
+                // 周期内小幅回升时，取末段 latestUsedPercent（120 + 80 = 200）
+                cycle(
+                    id: "fh-full-1",
+                    kind: .fiveHour,
+                    startOffset: 1 * hour,
+                    endOffset: 6 * hour,
+                    firstSampleOffset: 1 * hour,
+                    latest: 120,
+                    segments: [segment(id: "sf1", startOffset: 1 * hour, baseline: 0, latest: 120, maxUsed: 125)]
+                ),
+                cycle(
+                    id: "fh-full-2",
+                    kind: .fiveHour,
+                    startOffset: 1 * day,
+                    endOffset: 1 * day + 5 * hour,
+                    firstSampleOffset: 1 * day,
+                    latest: 80,
+                    segments: [segment(id: "sf2", startOffset: 1 * day, baseline: 0, latest: 80, maxUsed: 80)]
+                ),
+            ]
+        )
+
+        let ratio = QuotaCycleStore.weeklyToFiveHourRatio(
+            payload: payload,
+            accountKey: accountKey,
+            now: base.addingTimeInterval(3 * day)
+        )
+        XCTAssertNotNil(ratio)
+        XCTAssertEqual(ratio?.fiveHourConsumedPercent, 200)
+        XCTAssertEqual(ratio?.weeklyConsumedPercent, 50)
+        XCTAssertEqual(ratio?.ratio ?? 0, 4.0, accuracy: 0.001)
+    }
+
     /// 无前缀（缺 gemini-/3p-）的旧结构：靠组 displayName 区分 Gemini 与第三方。
     func testAntigravitySummaryGroupsFallbackToGroupNameWhenPrefixMissing() {
         let groups: [[String: Any]] = [
@@ -1440,6 +1619,145 @@ final class QuotaParsingTests: XCTestCase {
         let cleaned2 = QuotaHistoryStore.cleanupInconsistentChains(cross)
         XCTAssertEqual(cleaned2.events.count, 1)
         XCTAssertEqual(cleaned2.events.first?.afterRemainingPercent, 42)
+    }
+
+    func testHistoryRecordsInitialDropAndTimelineStartWhenContinuousCrossWindowSampleAlreadyConsumed() throws {
+        let dayStart = QuotaHistoryStore.todayStart(now: Date(timeIntervalSince1970: 1_788_000_000))
+        let oldFiveHourEnd = dayStart.addingTimeInterval(18 * 3_600 + 56 * 60)
+        let oldWeeklyEnd = dayStart.addingTimeInterval(5 * 86_400)
+        let newStart = dayStart.addingTimeInterval(15 * 3_600 + 2 * 60)
+        let newFiveHourEnd = newStart.addingTimeInterval(5 * 3_600)
+        let newWeeklyEnd = newStart.addingTimeInterval(7 * 86_400)
+        let key = "antigravity:primary:test"
+
+        func agySnapshot(fiveHourUsed: Double, fiveHourEnd: Date, weeklyUsed: Double, weeklyEnd: Date) -> QuotaSnapshot {
+            QuotaSnapshot(
+                app: .antigravity,
+                primaryLimit: QuotaLimit(
+                    id: "gemini-5h",
+                    kind: .fiveHour,
+                    displayName: "Gemini 5H",
+                    window: QuotaWindow(usedPercent: fiveHourUsed, resetsAt: fiveHourEnd, windowSeconds: 18_000),
+                    isActive: true
+                ),
+                secondaryLimit: QuotaLimit(
+                    id: "gemini-weekly",
+                    kind: .weekly,
+                    displayName: "Gemini Weekly",
+                    window: QuotaWindow(usedPercent: weeklyUsed, resetsAt: weeklyEnd, windowSeconds: 604_800),
+                    isActive: false
+                ),
+                planType: "Google AI Pro",
+                fetchedAt: newStart
+            )
+        }
+
+        var payload = QuotaHistoryPayload(dayStart: dayStart)
+        // 旧窗口最后两次采样（包含 15:07 服务端尚未切窗的滞后响应）
+        payload = QuotaHistoryStore.record(
+            payload: payload, accountKey: key, app: .antigravity, kind: .antigravityPrimary,
+            snapshot: agySnapshot(fiveHourUsed: 25, fiveHourEnd: oldFiveHourEnd, weeklyUsed: 41, weeklyEnd: oldWeeklyEnd),
+            sampledAt: newStart.addingTimeInterval(26)
+        )
+        payload = QuotaHistoryStore.record(
+            payload: payload, accountKey: key, app: .antigravity, kind: .antigravityPrimary,
+            snapshot: agySnapshot(fiveHourUsed: 27, fiveHourEnd: oldFiveHourEnd, weeklyUsed: 42, weeklyEnd: oldWeeklyEnd),
+            sampledAt: newStart.addingTimeInterval(4 * 60 + 27)
+        )
+        // 15:13 首次切到新窗口时已消耗至 97% / 98%
+        payload = QuotaHistoryStore.record(
+            payload: payload, accountKey: key, app: .antigravity, kind: .antigravityPrimary,
+            snapshot: agySnapshot(fiveHourUsed: 3, fiveHourEnd: newFiveHourEnd, weeklyUsed: 2, weeklyEnd: newWeeklyEnd),
+            sampledAt: newStart.addingTimeInterval(10 * 60 + 27)
+        )
+        // 15:17 周额度小幅回升到 99%
+        payload = QuotaHistoryStore.record(
+            payload: payload, accountKey: key, app: .antigravity, kind: .antigravityPrimary,
+            snapshot: agySnapshot(fiveHourUsed: 3, fiveHourEnd: newFiveHourEnd, weeklyUsed: 1, weeklyEnd: newWeeklyEnd),
+            sampledAt: newStart.addingTimeInterval(14 * 60 + 27)
+        )
+
+        let fiveHourEvents = payload.events.filter { $0.limitKind == .fiveHour }
+        let weeklyEvents = payload.events.filter { $0.limitKind == .weekly }
+        XCTAssertEqual(fiveHourEvents.last?.beforeRemainingPercent, 100)
+        XCTAssertEqual(fiveHourEvents.last?.afterRemainingPercent, 97)
+        XCTAssertEqual(fiveHourEvents.last?.deltaPercent, -3)
+        XCTAssertEqual(weeklyEvents.map(\.deltaPercent), [-1, -2, 1])
+
+        let fiveHourPeriod = try XCTUnwrap(QuotaHistoryStore.timelinePeriods(
+            payload: payload, accountKey: key, limitKind: .fiveHour,
+            now: newStart.addingTimeInterval(15 * 60)
+        ).first)
+        XCTAssertEqual(fiveHourPeriod.totalDelta, -5)
+        let newFiveHourEntries = fiveHourPeriod.entries.filter { $0.windowIndex == 1 }
+        XCTAssertEqual(newFiveHourEntries.map(\.remainingPercent), [100, 97, 97])
+        XCTAssertEqual(newFiveHourEntries.first?.sampledAt, newStart)
+        XCTAssertEqual(newFiveHourEntries.first?.source, .sample)
+
+        let weeklyPeriods = QuotaHistoryStore.timelinePeriods(
+            payload: payload, accountKey: key, limitKind: .weekly,
+            now: newStart.addingTimeInterval(15 * 60)
+        )
+        let currentWeekly = try XCTUnwrap(weeklyPeriods.first { $0.kind == .currentCycle })
+        XCTAssertEqual(currentWeekly.totalDelta, -1)
+        XCTAssertEqual(currentWeekly.entries.map(\.remainingPercent), [100, 98, 99])
+        XCTAssertEqual(currentWeekly.entries.first?.sampledAt, newStart)
+        XCTAssertNil(currentWeekly.entries.first?.deltaPercent)
+    }
+
+    func testCleanupInconsistentChainsBackfillsContinuousCrossWindowInitialDropAndKeepsStartFromHundred() {
+        let start = Date(timeIntervalSince1970: 1_788_000_000)
+        let oldEnd = start.addingTimeInterval(3 * 86_400)
+        let newStart = start.addingTimeInterval(10 * 60)
+        let newEnd = newStart.addingTimeInterval(7 * 86_400)
+        let laterEnd = newEnd.addingTimeInterval(7 * 86_400)
+
+        func event(_ at: Date, before: Int, after: Int, resetsAt: Date) -> QuotaChangeEvent {
+            QuotaChangeEvent(
+                id: "\(Int(at.timeIntervalSince1970))|\(before)|\(after)",
+                accountKey: "antigravity:primary:test",
+                app: .antigravity,
+                kind: .antigravityPrimary,
+                sampledAt: at,
+                limitID: "gemini-weekly",
+                limitKind: .weekly,
+                beforeRemainingPercent: before,
+                afterRemainingPercent: after,
+                deltaPercent: after - before,
+                resetsAt: resetsAt
+            )
+        }
+
+        // 1) 连续在线跨窗后缺失 100 -> 98，首条事件直接是 98 -> 99：应补回 100 -> 98 且幂等
+        var payload = QuotaHistoryPayload(dayStart: QuotaHistoryStore.todayStart(now: start))
+        payload.events = [
+            event(start.addingTimeInterval(14 * 60), before: 59, after: 58, resetsAt: oldEnd),
+            event(start.addingTimeInterval(24 * 60), before: 98, after: 99, resetsAt: newEnd),
+        ]
+        let cleaned = QuotaHistoryStore.cleanupInconsistentChains(payload)
+        XCTAssertEqual(cleaned.events.map(\.beforeRemainingPercent), [59, 100, 98])
+        XCTAssertEqual(cleaned.events.map(\.afterRemainingPercent), [58, 98, 99])
+        XCTAssertEqual(cleaned.events.map(\.deltaPercent), [-1, -2, 1])
+        XCTAssertEqual(cleaned, QuotaHistoryStore.cleanupInconsistentChains(cleaned))
+
+        // 2) 旧窗收尾恰好回到 100%，新窗首条就是 100 -> 97：不能被误判成跨窗假差值而整段删光
+        var fromHundred = QuotaHistoryPayload(dayStart: QuotaHistoryStore.todayStart(now: start))
+        fromHundred.events = [
+            event(start, before: 99, after: 100, resetsAt: oldEnd),
+            event(newStart.addingTimeInterval(5 * 60), before: 100, after: 97, resetsAt: newEnd),
+            event(newStart.addingTimeInterval(10 * 60), before: 97, after: 96, resetsAt: newEnd),
+        ]
+        let cleanedFromHundred = QuotaHistoryStore.cleanupInconsistentChains(fromHundred)
+        XCTAssertEqual(cleanedFromHundred.events.map(\.deltaPercent), [1, -3, -1])
+
+        // 3) 相邻事件跨度超过容差（如离线数天）：不回补 100 -> 90
+        var gapped = QuotaHistoryPayload(dayStart: QuotaHistoryStore.todayStart(now: start))
+        gapped.events = [
+            event(start, before: 60, after: 55, resetsAt: newEnd),
+            event(newEnd.addingTimeInterval(2 * 3_600), before: 90, after: 85, resetsAt: laterEnd),
+        ]
+        let cleanedGapped = QuotaHistoryStore.cleanupInconsistentChains(gapped)
+        XCTAssertEqual(cleanedGapped.events.map(\.deltaPercent), [-5, -5])
     }
 
     func testClaudePrimaryAccountKeyNormalizesAndHashesEmail() {
