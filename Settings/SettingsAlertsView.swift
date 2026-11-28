@@ -26,8 +26,8 @@ struct SettingsAlertsView: View {
             SettingsCard(
                 title: "Low Quota Alert",
                 chinese: "低额度提醒",
-                desc: "Checks enabled quota services and imported Codex accounts after each successful refresh.",
-                chineseDesc: "包含已启用的额度服务和导入的 Codex 账号，每次成功刷新后检查",
+                desc: "Checks enabled agents with quota and imported Codex accounts after each successful refresh.",
+                chineseDesc: "包含已启用的额度 Agent 和导入的 Codex 账号，每次成功刷新后检查",
                 isHighlighted: highlightedSection == "alerts-main"
             ) {
                 SettingsRow(
@@ -104,6 +104,7 @@ struct SettingsAlertsView: View {
                 .padding(.horizontal, SettingsLayout.cardHorizontalPadding)
                 .opacity(settings.quotaAlertsEnabled ? 1 : 0.48)
             }
+            .id("alerts-main")
 
             // 监听的额度窗口
             SettingsCard(
@@ -189,6 +190,7 @@ struct SettingsAlertsView: View {
                     .disabled(!settings.quotaAlertsEnabled)
                 }
             }
+            .id("alerts-windows")
             .opacity(settings.quotaAlertsEnabled ? 1 : 0.6)
         }
         .task { _ = await service.refreshPermission() }

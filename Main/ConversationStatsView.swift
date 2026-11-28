@@ -148,9 +148,7 @@ struct ConversationStatsView: View {
                     .font(.system(size: 8, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 6)
-            .frame(height: 24)
-            .contentShape(Rectangle())
+            .statsFilterMenuChrome()
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
@@ -186,6 +184,8 @@ struct ConversationStatsView: View {
         let rows = result.rows
         return VStack(spacing: 0) {
             filterRow(result)
+            Divider()
+                .padding(.top, 8)
 
             // 空态规则同项目页：首次整理 → 范围内没有对话 → 搜索无匹配。
             if isOrganizing {
@@ -517,7 +517,7 @@ private struct ConversationListRow: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 ServiceTile(app: summary.info.app, size: 14)
                 HighlightedText(text: displayTitle, query: PrivacyDisplay.isEnabled ? "" : lowercasedSearch)
@@ -534,7 +534,7 @@ private struct ConversationListRow: View {
                 }
                 Spacer(minLength: 4)
                 Text("\(StatsFormatter.day(summary.rangeLastAt)) \(StatsFormatter.time(summary.rangeLastAt))")
-                    .font(.system(size: 10.5))
+                    .font(.system(size: 11))
                     .monospacedDigit()
                     .foregroundStyle(.tertiary)
                     .fixedSize()
@@ -554,7 +554,7 @@ private struct ConversationListRow: View {
                     Text(promptPreview).lineLimit(1)
                 }
             }
-            .font(.system(size: 10.5))
+            .font(.system(size: 11))
             .foregroundStyle(.secondary)
 
             if !PrivacyDisplay.isEnabled,
@@ -571,7 +571,7 @@ private struct ConversationListRow: View {
                 Spacer(minLength: 4)
                 Text("\(StatsFormatter.compactToken(summary.totals.totalTokens)) Tokens")
                 Text(costLabel(summary.costs))
-                    .font(.system(size: 11.5, weight: .semibold))
+                    .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(.primary)
                 if let resumeCommand {
                     CopyResumeCommandButton(resumeCommand: resumeCommand, compact: true)
@@ -580,7 +580,7 @@ private struct ConversationListRow: View {
                 }
             }
             .lineLimit(1)
-            .font(.system(size: 10.5))
+            .font(.system(size: 11))
             .monospacedDigit()
             .foregroundStyle(.secondary)
         }
@@ -711,12 +711,15 @@ private struct ConversationDetailView: View {
     @Environment(AppState.self) private var appState
     let detail: ConversationDetail
 
+    @State private var copiedConversationID = false
+    @State private var copyFeedbackTask: Task<Void, Never>?
+
     var body: some View {
         GeometryReader { proxy in
             ScrollView {
                 let isWide = proxy.size.width >= StatsSplitMetrics.wideDetailWidth
                 let width = max(0, proxy.size.width - 40)
-                VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 12) {
                     header
                     kpis
                     StatsSplitRow(isWide: isWide, width: width, leadingFraction: 0.5) {
@@ -737,6 +740,15 @@ private struct ConversationDetailView: View {
                 }
                 .padding(20)
             }
+        }
+        .onChange(of: detail.info.conversationID) { _, _ in
+            copyFeedbackTask?.cancel()
+            copyFeedbackTask = nil
+            copiedConversationID = false
+        }
+        .onDisappear {
+            copyFeedbackTask?.cancel()
+            copyFeedbackTask = nil
         }
     }
 
@@ -874,12 +886,21 @@ private struct ConversationDetailView: View {
                     guard !PrivacyDisplay.isEnabled else { return }
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(detail.info.conversationID, forType: .string)
+                    copiedConversationID = true
+                    copyFeedbackTask?.cancel()
+                    copyFeedbackTask = Task {
+                        try? await Task.sleep(for: .seconds(1.5))
+                        guard !Task.isCancelled else { return }
+                        copiedConversationID = false
+                    }
                 } label: {
-                    Image(systemName: "doc.on.doc")
-                        .font(.system(size: 10))
+                    Image(systemName: copiedConversationID ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 10, weight: copiedConversationID ? .semibold : .regular))
+                        .foregroundStyle(copiedConversationID ? Color.green : Color.secondary)
                 }
                 .buttonStyle(.borderless)
-                .help(tr("Copy conversation ID", "复制对话 ID"))
+                .pointingHandCursor()
+                .help(copiedConversationID ? tr("Copied", "已复制") : tr("Copy conversation ID", "复制对话 ID"))
             }
         }
     }
@@ -961,10 +982,14 @@ private struct ConversationDetailView: View {
         }
     }
 
-    /// 先列 Standard / Fast，再列按最终档位价格汇总的四项；合计已在 KPI 卡，不再重复。
+    /// 先列按速度档位，再列按 Token 类型；两组为不同拆分维度，分别加轻量组标避免误读成 6 项相加。
     private func costDetails(fillHeight: Bool) -> some View {
         DetailPanel(title: tr("Estimated cost breakdown", "估算费用构成"), fillHeight: fillHeight) {
-            VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(tr("By speed tier", "按速度档位"))
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .padding(.bottom, 2)
                 DetailValueRow(label: "Standard", value: StatsFormatter.tierCost(
                     detail.speed.standard.costUSD,
                     hasUnpricedUsage: detail.speed.standardHasUnpricedCost
@@ -974,8 +999,11 @@ private struct ConversationDetailView: View {
                     detail.speed.fast.costUSD,
                     hasUnpricedUsage: detail.speed.fastHasUnpricedCost
                 ))
-                Divider()
-                    .padding(.vertical, 4)
+                Text(tr("By token type", "按 Token 类型"))
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 10)
+                    .padding(.bottom, 2)
                 DetailValueRow(label: tr("Input", "输入"), value: StatsFormatter.tierCostPrecise(
                     detail.costs.input,
                     hasUnpricedUsage: detail.costs.hasUnpricedUsage
@@ -1006,50 +1034,67 @@ private struct ConversationDetailView: View {
         DetailPanel(title: tr("By model", "按模型"), fillHeight: fillHeight) {
             VStack(spacing: 0) {
                 ForEach(detail.models) { item in
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 5) {
                         HStack(spacing: 6) {
                             Text(item.model)
-                                .font(.system(size: 11.5, design: .monospaced))
+                                .font(.system(size: 12.5, weight: .medium, design: .monospaced))
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             UsageSpeedBadge(summary: item.speed.summary)
                             Spacer(minLength: 6)
                             Text(StatsFormatter.compactToken(item.totals.totalTokens))
-                                .font(.system(size: 10.5))
+                                .font(.system(size: 11.5))
                                 .monospacedDigit()
                                 .foregroundStyle(.secondary)
+                                .lineLimit(1)
                                 .fixedSize()
                             Text(costLabel(item.costs))
-                                .font(.system(size: 11.5, weight: .semibold))
+                                .font(.system(size: 12.5, weight: .semibold))
                                 .monospacedDigit()
-                                .frame(width: 76, alignment: .trailing)
+                                .lineLimit(1)
+                                .frame(width: 78, alignment: .trailing)
                         }
-                        Text("in \(StatsFormatter.compactToken(item.totals.inputTokens))  ·  out \(StatsFormatter.compactToken(item.totals.outputTokens))  ·  cache \(StatsFormatter.compactToken(item.totals.cacheReadTokens))")
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 10) {
+                            Text("in \(StatsFormatter.compactToken(item.totals.inputTokens))")
+                            Text("out \(StatsFormatter.compactToken(item.totals.outputTokens))")
+                            Text("cache \(StatsFormatter.compactToken(item.totals.cacheReadTokens))")
+                        }
+                        .font(.system(size: 11.5))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                         // Pi 有计时插件记录时也带首字时间，按实际数据显示首字。
                         if detail.info.app.supportsGenerationTiming || item.totals.timing.averageFirstTokenSeconds != nil {
-                            Text("\(tr("First token", "首字")) \(StatsFormatter.firstTokenLatency(item.totals.timing.averageFirstTokenSeconds))  ·  \(tr("Output speed", "输出速度")) \(StatsFormatter.outputSpeed(item.totals.timing))")
-                                .font(.system(size: 10.5, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .help(StatsFormatter.outputSpeedHelp(item.totals.timing))
+                            HStack(spacing: 10) {
+                                Text("\(tr("First token", "首字")) \(StatsFormatter.firstTokenLatency(item.totals.timing.averageFirstTokenSeconds))")
+                                Text("\(tr("Output speed", "输出速度")) \(StatsFormatter.outputSpeed(item.totals.timing))")
+                            }
+                            .font(.system(size: 11.5))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .help(StatsFormatter.outputSpeedHelp(item.totals.timing))
                         } else if detail.info.app.supportsOutputSpeed {
                             Text("\(tr("Output speed", "输出速度")) \(StatsFormatter.outputSpeed(item.totals.timing))")
-                                .font(.system(size: 10.5, design: .monospaced))
+                                .font(.system(size: 11.5))
+                                .monospacedDigit()
                                 .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
+                                .lineLimit(1)
                                 .help(StatsFormatter.outputSpeedHelp(item.totals.timing))
                         }
                         if item.speed.fast.requestCount > 0 {
-                            Text("Fast \(StatsFormatter.compactToken(item.speed.fast.totalTokens))  ·  \(tr("billing equivalent", "计费等效")) \(StatsFormatter.billingEquivalentTokens(item.speed))  ·  \(StatsFormatter.fastMultiplier(item.speed))  ·  \(StatsFormatter.tierCost(item.speed.fast.costUSD, hasUnpricedUsage: item.speed.fastHasUnpricedCost))")
-                                .font(.system(size: 10.5, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
+                            HStack(spacing: 4) {
+                                Image(systemName: "bolt")
+                                    .font(.system(size: 10.5, weight: .medium))
+                                Text("Fast \(StatsFormatter.compactToken(item.speed.fast.totalTokens)) · \(tr("equiv.", "等效")) \(StatsFormatter.billingEquivalentTokens(item.speed)) · \(StatsFormatter.fastMultiplier(item.speed)) · \(StatsFormatter.tierCost(item.speed.fast.costUSD, hasUnpricedUsage: item.speed.fastHasUnpricedCost))")
+                            }
+                            .font(.system(size: 11.5))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
                         }
                     }
-                    .padding(.vertical, 6)
+                    .padding(.vertical, 8)
                     if item.id != detail.models.last?.id { Divider() }
                 }
             }
@@ -1068,7 +1113,7 @@ private struct ConversationDetailView: View {
                     Text(tr("Requests", "请求"))
                         .frame(width: 52, alignment: .trailing)
                 }
-                .font(.system(size: 10.5, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.tertiary)
                 .padding(.bottom, 6)
                 Divider()
@@ -1082,7 +1127,7 @@ private struct ConversationDetailView: View {
                     "Billing equivalent \(StatsFormatter.billingEquivalentTokens(detail.speed)) tokens · Fast multiplier \(StatsFormatter.fastMultiplier(detail.speed))",
                     "计费等效 \(StatsFormatter.billingEquivalentTokens(detail.speed)) Tokens · Fast 倍率 \(StatsFormatter.fastMultiplier(detail.speed))"
                 ))
-                .font(.system(size: 11))
+                .font(.system(size: 11.5))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1104,10 +1149,10 @@ private struct ConversationDetailView: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 52, alignment: .trailing)
         }
-        .font(.system(size: 11.5))
+        .font(.system(size: 12))
         .monospacedDigit()
         .lineLimit(1)
-        .padding(.vertical, 5)
+        .padding(.vertical, 6)
     }
 
     private var cacheCreationText: String {
@@ -1182,13 +1227,13 @@ private struct DetailPanel<Content: View>: View {
     var fillHeight = false
     @ViewBuilder var content: () -> Content
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             Text(title).font(.system(size: 12.5, weight: .semibold))
             content()
         }
-        .padding(14)
+        .padding(16)
         .frame(maxWidth: .infinity, maxHeight: fillHeight ? .infinity : nil, alignment: .topLeading)
-        .ccPanel(cornerRadius: 10)
+        .ccPanel(cornerRadius: 12)
     }
 }
 
@@ -1214,11 +1259,13 @@ private struct DetailValueRow: View {
                 .font(.system(size: 12.5, weight: .semibold))
                 .monospacedDigit()
                 .lineLimit(1)
+                .frame(minWidth: 72, alignment: .trailing)
             if let token {
                 Text(token.share)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
+                    .lineLimit(1)
                     .frame(width: 48, alignment: .trailing)
             }
         }

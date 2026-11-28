@@ -78,9 +78,11 @@ struct SettingsGeneralView: View {
                     .tint(.green)
                 }
             }
+            .id("general-system")
 
             // 多设备云同步
             cloudSyncCard(settings: settings)
+                .id("general-cloud-sync")
 
             // 诊断与日志
             SettingsCard(
@@ -147,6 +149,7 @@ struct SettingsGeneralView: View {
                         .tint(.green)
                 }
             }
+            .id("general-diagnostics")
         }
     }
 
@@ -232,6 +235,7 @@ struct SettingsGeneralView: View {
                 .strokeBorder(Color.accentColor.opacity(highlightedSection == "general-updates" ? 0.65 : 0), lineWidth: 1.5)
                 .animation(.easeInOut(duration: 0.25), value: highlightedSection)
         )
+        .id("general-updates")
     }
 
     // MARK: - Multi-Device Cloud Sync

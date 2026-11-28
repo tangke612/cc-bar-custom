@@ -43,8 +43,8 @@ struct SettingsNetworkView: View {
                 SettingsRow(
                     label: "Quota refresh interval",
                     chinese: "额度刷新间隔",
-                    desc: "How often CCBar fetches remaining quota from enabled services.",
-                    chineseDesc: "向已启用服务查询剩余额度的轮询周期"
+                    desc: "How often CCBar fetches remaining quota from enabled agents.",
+                    chineseDesc: "向已启用的 Agent 查询剩余额度的轮询周期"
                 ) {
                     Picker("", selection: Binding(
                         get: { settings.quotaInterval },
@@ -86,6 +86,7 @@ struct SettingsNetworkView: View {
                     .frame(width: SettingsLayout.menuPickerWidth)
                 }
             }
+            .id("network-polling")
 
             // 全局网络代理
             SettingsCard(
@@ -121,6 +122,7 @@ struct SettingsNetworkView: View {
                         .id(resolution)
                 }
             }
+            .id("network-proxy")
 
             // Claude 专用代理
             SettingsCard(
